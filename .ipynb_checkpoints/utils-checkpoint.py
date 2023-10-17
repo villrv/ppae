@@ -23,5 +23,3 @@ from einops import rearrange, repeat
 
 from dotmap import DotMap
 from glob import glob
-
-
