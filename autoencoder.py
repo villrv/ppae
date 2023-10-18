@@ -1,14 +1,17 @@
 from utils import *
 
 
-def loglikelihood_single(event_rate_list, mesh_rate_list, T):
+def loglikelihood_single(log_event_rate_list, log_mesh_rate_list, T):
     '''
+    Likelihood of an event list (t1,...,tn) with Poisson rate function r(t) is:
+        r(t1) * ... * r(tn) * exp(-integral(r(t)))
+    We take the log likelihood for better computational performance
     log likelihood of a single event list. Needed when we hav event lists of different length
     '''
-    integral = 0.5 * (torch.sum(mesh_rate_list[1:]) + torch.sum(mesh_rate_list[:-1])) * T / (len(mesh_rate_list)-1)
-    return torch.sum(event_rate_list) - integral
+    integral = 0.5 * (torch.sum(log_mesh_rate_list[1:]) + torch.sum(log_mesh_rate_list[:-1])) * T / (len(log_mesh_rate_list)-1)
+    return torch.sum(log_event_rate_list) - integral
 
-def loglikelihood(event_rate_list, mesh_rate_list, T):
+def loglikelihood(log_event_rate_list, log_mesh_rate_list, T):
     '''
     log likelihood of a batch of event list with the same length.
     Input:
@@ -16,12 +19,12 @@ def loglikelihood(event_rate_list, mesh_rate_list, T):
         mesh_rate_list: (B, n_mesh)
         T: (B,)
     '''
-    B, n_mesh = mesh_rate_list.shape
-    integral = 0.5 * (torch.sum(mesh_rate_list[:,1:], dim=1) + torch.sum(mesh_rate_list[:,:-1], dim=1)) * T / (n_mesh-1)   # (B,)
-    return torch.mean(torch.sum(event_rate_list, dim=1) - integral)
+    B, n_mesh = log_mesh_rate_list.shape
+    integral = 0.5 * (torch.sum(log_mesh_rate_list[:,1:], dim=1) + torch.sum(log_mesh_rate_list[:,:-1], dim=1)) * T / (n_mesh-1)   # (B,)
+    return torch.mean(torch.sum(log_event_rate_list, dim=1) - integral)
     
 
-# The following is a positional encoding module that potentially helps
+# The following is a positional encoding module (took elsewhere, penging modification) that potentially helps
 # class PositionalEncoding(nn.Module):
 #     """
 #     Positional Encoding for the input t.
@@ -110,7 +113,7 @@ class Autoencoder(pl.LightningModule):
     def decode(self, coded_t_list): # et_list has shape (B, n, pe_size)
         '''
         Input: et_list, the positional encoded t_list with shape (B, n, pe_size)
-        Output: rate function values at those t, with shape (B, n)
+        Output: log rate function values at those t, with shape (B, n)
         '''
         # Broadcast and concat
         B, n_t, _ = coded_t_list.shape
@@ -132,9 +135,9 @@ class Autoencoder(pl.LightningModule):
         T, _ = torch.max(batch['event_list'], dim=1)
         coded_event_t_list = self.code(batch['event_list'])
         coded_mesh_t_list = self.code(T.unsqueeze(1) * torch.linspace(0, 1, self.resolution+1).unsqueeze(0))
-        event_rate_list = self.decode(coded_event_t_list).squeeze()
-        mesh_rate_list = self.decode(coded_mesh_t_list).squeeze()
-        loss = loglikelihood(event_rate_list, mesh_rate_list, T) + self.lam * torch.norm(self.latent, p=2)
+        log_event_rate_list = self.decode(coded_event_t_list).squeeze()
+        log_mesh_rate_list = self.decode(coded_mesh_t_list).squeeze()
+        loss = loglikelihood(log_event_rate_list, log_mesh_rate_list, T) + self.lam * torch.norm(self.latent, p=2)
         self.log('train_loss', loss)
         return loss
     
