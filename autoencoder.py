@@ -75,7 +75,7 @@ class NaiveEncoding(nn.Module):
         return t_list.unsqueeze(-1)
 
 class MLP(nn.Module):
-    def __init__(self, input_size, output_size, hidden_size = 64, activation='relu'):
+    def __init__(self, input_size, output_size, hidden_size = 16, activation='relu'):
         super(MLP, self).__init__()
         if activation=='relu':
             last_layer = nn.ReLU()
