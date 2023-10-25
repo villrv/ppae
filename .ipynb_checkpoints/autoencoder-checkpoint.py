@@ -24,46 +24,38 @@ def loglikelihood(log_event_rate_list, log_mesh_rate_list, T):
     return torch.mean(torch.sum(log_event_rate_list, dim=1) - integral)
     
 
-# The following is a positional encoding module (took elsewhere, penging modification) that potentially helps
-# class PositionalEncoding(nn.Module):
-#     """
-#     Positional Encoding for the input t.
-#     """
+class PositionalEncoding(nn.Module):
+    """
+    Positional Encoding for the input t.
+    """
 
-#     def __init__(self, num_freqs=6, d_in=3, freq_factor=np.pi, include_input=True):
-#         super().__init__()
-#         self.num_freqs = num_freqs
-#         self.d_in = d_in
-#         self.freqs = freq_factor * 2.0 ** torch.arange(0, num_freqs)
-#         self.d_out = self.num_freqs * 2 * d_in
-#         self.include_input = include_input
-#         if include_input:
-#             self.d_out += d_in
-#         # f1 f1 f2 f2 ... to multiply x by
-#         self.register_buffer(
-#             "_freqs", torch.repeat_interleave(self.freqs, 2).view(1, -1, 1)
-#         )
-#         # 0 pi/2 0 pi/2 ... so that
-#         # (sin(x + _phases[0]), sin(x + _phases[1]) ...) = (sin(x), cos(x)...)
-#         _phases = torch.zeros(2 * self.num_freqs)
-#         _phases[1::2] = np.pi * 0.5
-#         self.register_buffer("_phases", _phases.view(1, -1, 1))
+    def __init__(self, num_freqs=6, freq_factor=np.pi, include_input=True):
+        super(PositionalEncoding, self).__init__()
+        self.num_freqs = num_freqs
+        self.freqs = freq_factor * 2.0 ** torch.arange(0, num_freqs) # (num_freqs, )
+        self.include_input = include_input
+        # f1 f1 f2 f2 ... to multiply x by
+        self.register_buffer(
+            "_freqs", torch.repeat_interleave(self.freqs, 2).view(1, 1, -1) # (1, 1, 2*num_freqs)
+        )
+        _phases = torch.zeros(2 * self.num_freqs)
+        _phases[1::2] = np.pi * 0.5
+        self.register_buffer("_phases", _phases.view(1, 1, -1))
 
-#     def forward(self, x):
-#         """
-#         Apply positional encoding (new implementation)
-#         :param x (batch, self.d_in)
-#         :return (batch, self.d_out)
-#         """
-#         with profiler.record_function("positional_enc"):
-#             embed = x.unsqueeze(1).repeat(1, self.num_freqs * 2, 1)
-#             embed = torch.sin(torch.addcmul(self._phases, embed, self._freqs))
-#             embed = embed.view(x.shape[0], -1)
-#             if self.include_input:
-#                 embed = torch.cat((x, embed), dim=-1)
-#             return embed
+    def forward(self, t_list):
+        """
+        Apply positional encoding
+        :param t_list (B, n)
+        :return (B, n, d_out)
+        """
+        B, n = t_list.shape
+        t_list = t_list.unsqueeze(-1) # (B, n, 1)
+        coded_t_list = t_list.repeat(1, 1, self.num_freqs * 2) # (B, n, 2*num_freqs)
+        coded_t_list = torch.sin(torch.addcmul(self._phases, coded_t_list, self._freqs))
+        if self.include_input:
+            coded_t_list = torch.cat((t_list, coded_t_list), dim=-1)
+        return coded_t_list
 
-# Currently just a naive positional encoding
 class NaiveEncoding(nn.Module):
     '''
     A naive encoding that just adds a new dimension to t_list
@@ -77,14 +69,15 @@ class NaiveEncoding(nn.Module):
 class MLP(nn.Module):
     def __init__(self, input_size, output_size, hidden_size = 64, activation='relu'):
         super(MLP, self).__init__()
-        if activation=='relu':
-            last_layer = nn.ReLU()
+        if activation=='none':
+            self.layer = nn.Sequential(nn.Linear(input_size, hidden_size),
+                                       nn.ReLU(),
+                                       nn.Linear(hidden_size, output_size))
         else:
-            last_layer = nn.LeakyReLU(negative_slope=0.1)
-        self.layer = nn.Sequential(nn.Linear(input_size, hidden_size),
-                                   nn.ReLU(),
-                                   nn.Linear(hidden_size, output_size),
-                                  last_layer)
+            self.layer = nn.Sequential(nn.Linear(input_size, hidden_size),
+                                       nn.ReLU(),
+                                       nn.Linear(hidden_size, output_size),
+                                       nn.ReLU())
 
     def forward(self, x):
         return self.layer(x)
@@ -103,7 +96,7 @@ class Autoencoder(pl.LightningModule):
         self.output_size = output_size
         self.encoder = MLP(self.input_size, self.latent_size)
         self.decoder = MLP(self.latent_size+self.pe_size, self.output_size, activation='relu')
-        self.code = NaiveEncoding()
+        self.code = PositionalEncoding()
         self.resolution = resolution
         self.lam = lam
     
@@ -117,7 +110,7 @@ class Autoencoder(pl.LightningModule):
         '''
         # Broadcast and concat
         B, n_t, _ = coded_t_list.shape
-        decoder_input = torch.cat((self.latent.unsqueeze(1).expand(B,n_t,-1), coded_t_list), dim=-1)  # (B, n, hidden_size+pe_size)
+        decoder_input = torch.cat((self.latent.unsqueeze(1).expand(B,n_t,-1), coded_t_list), dim=-1)  # (B, n, latent_size+pe_size)
         return self.decoder(decoder_input)
     
     def forward(self, x, t_list):
