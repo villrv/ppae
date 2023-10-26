@@ -1,27 +1,4 @@
 from utils import *
-
-
-def loglikelihood_single(log_event_rate_list, log_mesh_rate_list, T):
-    '''
-    Likelihood of an event list (t1,...,tn) with Poisson rate function r(t) is:
-        r(t1) * ... * r(tn) * exp(-integral(r(t)))
-    We take the log likelihood for better computational performance
-    log likelihood of a single event list. Needed when we hav event lists of different length
-    '''
-    integral = 0.5 * (torch.sum(torch.exp(log_mesh_rate_list[1:])) + torch.sum(torch.exp(log_mesh_rate_list[:-1]))) * T / (len(log_mesh_rate_list)-1)
-    return torch.sum(log_event_rate_list) - integral
-
-def loglikelihood(log_event_rate_list, log_mesh_rate_list, T):
-    '''
-    log likelihood of a batch of event list with the same length.
-    Input:
-        event_rate_list: (B, n_event)
-        mesh_rate_list: (B, n_mesh)
-        T: (B,)
-    '''
-    B, n_mesh = log_mesh_rate_list.shape
-    integral = 0.5 * (torch.sum(torch.exp(log_mesh_rate_list[:,1:]), dim=1) + torch.sum(torch.exp(log_mesh_rate_list[:,:-1]), dim=1)) * T / (n_mesh-1)   # (B,)
-    return torch.mean(torch.sum(log_event_rate_list, dim=1) - integral)
     
 
 class PositionalEncoding(nn.Module):
@@ -82,6 +59,106 @@ class MLP(nn.Module):
     def forward(self, x):
         return self.layer(x)
     
+    
+class ResnetBlockFC(nn.Module):
+    """
+    Fully connected ResNet Block class.
+    Taken from DVR code.
+    :param size_in (int): input dimension
+    :param size_out (int): output dimension
+    :param size_h (int): hidden dimension
+    
+    Comment: we are using pre-activation (activation before dense layers), mainly to allow flexible output activation when putting these layers together.
+    """
+
+    def __init__(self, size_in, size_out=None, size_h=None):
+        super().__init__()
+        
+        # Attributes
+        if size_out is None:
+            size_out = size_in
+
+        if size_h is None:
+            size_h = min(size_in, size_out)
+
+        self.size_in = size_in
+        self.size_h = size_h
+        self.size_out = size_out
+        
+        # Submodules
+        self.fc_0 = nn.Linear(size_in, size_h)
+        self.fc_1 = nn.Linear(size_h, size_out)
+
+
+        # Init
+        nn.init.constant_(self.fc_0.bias, 0.0)
+        nn.init.kaiming_normal_(self.fc_0.weight, a=0, mode="fan_in")
+        nn.init.constant_(self.fc_1.bias, 0.0)
+        nn.init.zeros_(self.fc_1.weight)
+
+        self.activation = nn.ReLU()
+
+        if size_in == size_out:
+            self.shortcut = None
+        else:
+            self.shortcut = nn.Linear(size_in, size_out, bias=False)
+            nn.init.constant_(self.shortcut.bias, 0.0)
+            nn.init.kaiming_normal_(self.shortcut.weight, a=0, mode="fan_in")
+
+    def forward(self, x):
+        net = self.fc_0(self.activation(x))
+        dx = self.fc_1(self.activation(net))
+
+        if self.shortcut is not None:
+            x_s = self.shortcut(x)
+        else:
+            x_s = x
+        return x_s + dx
+    
+class ResnetFC(nn.Module):
+    def __init__(
+        self,
+        d_in,
+        d_out,
+        n_blocks=3,
+        d_hidden=64,
+    ):
+        """
+        :param d_in input size
+        :param d_out output size
+        :param n_blocks number of Resnet blocks
+        :param d_hidden hidden dimension throughout network
+        """
+        super().__init__()
+        if d_in > 0:
+            self.lin_in = nn.Linear(d_in, d_hidden)
+            nn.init.constant_(self.lin_in.bias, 0.0)
+            nn.init.kaiming_normal_(self.lin_in.weight, a=0, mode="fan_in")
+
+        self.lin_out = nn.Linear(d_hidden, d_out)
+        nn.init.constant_(self.lin_out.bias, 0.0)
+        nn.init.kaiming_normal_(self.lin_out.weight, a=0, mode="fan_in")
+
+        self.n_blocks = n_blocks
+        self.d_in = d_in
+        self.d_out = d_out
+        self.d_hidden = d_hidden
+
+        self.blocks = nn.ModuleList(
+            [ResnetBlockFC(d_hidden) for i in range(n_blocks)]
+        )
+
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        x = self.lin_in(self.activation(x))
+            
+        for blkid in range(self.n_blocks):
+            x = self.blocks[blkid](x)
+            
+        out = self.lin_out(self.activation(x))
+        return out
+
 
 class Autoencoder(pl.LightningModule):
     '''
@@ -94,8 +171,8 @@ class Autoencoder(pl.LightningModule):
         self.latent_size = latent_size
         self.pe_size = pe_size
         self.output_size = output_size
-        self.encoder = MLP(self.input_size, self.latent_size)
-        self.decoder = MLP(self.latent_size+self.pe_size, self.output_size, activation='relu')
+        self.encoder = ResnetFC(self.input_size, self.latent_size)
+        self.decoder = ResnetFC(self.latent_size+self.pe_size, self.output_size)
         self.code = PositionalEncoding()
         self.resolution = resolution
         self.lam = lam
@@ -124,9 +201,10 @@ class Autoencoder(pl.LightningModule):
             type: (B,) type of sources
             event_list: (B, n)
         '''
-        self.encode(batch['event_list'])
-        T, _ = torch.max(batch['event_list'], dim=1)
         coded_event_t_list = self.code(batch['event_list'])
+        B, n, _ = coded_event_t_list.shape
+        self.encode(coded_event_t_list.reshape(B,-1))
+        T, _ = torch.max(batch['event_list'], dim=1)
         coded_mesh_t_list = self.code(T.unsqueeze(1) * torch.linspace(0, 1, self.resolution+1).unsqueeze(0))
         log_event_rate_list = self.decode(coded_event_t_list).squeeze()
         log_mesh_rate_list = self.decode(coded_mesh_t_list).squeeze()
