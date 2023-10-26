@@ -165,7 +165,7 @@ class Autoencoder(pl.LightningModule):
     Input: Undecided
     Output: the log of the rate function at the query point x.
     '''
-    def __init__(self, input_size, latent_size, pe_size, output_size, resolution=128, lam = 1):
+    def __init__(self, input_size, latent_size, pe_size, output_size, resolution=128, lam_latent = 0, lam_TV = 0, lam_gradient = 0):
         super(Autoencoder, self).__init__()
         self.input_size = input_size
         self.latent_size = latent_size
@@ -175,7 +175,9 @@ class Autoencoder(pl.LightningModule):
         self.decoder = ResnetFC(self.latent_size+self.pe_size, self.output_size)
         self.code = PositionalEncoding()
         self.resolution = resolution
-        self.lam = lam
+        self.lam_latent = lam_latent
+        self.lam_TV = lam_TV
+        self.lam_gradient = lam_gradient # Gradient loss is more involved.
     
     def encode(self, encoder_input):
         self.latent = self.encoder(encoder_input) # (B, latent_size)
@@ -201,14 +203,24 @@ class Autoencoder(pl.LightningModule):
             type: (B,) type of sources
             event_list: (B, n)
         '''
-        coded_event_t_list = self.code(batch['event_list'])
+        # code t_list
+        event_t_list = batch['event_list']
+        coded_event_t_list = self.code(event_t_list)
         B, n, _ = coded_event_t_list.shape
+        
+        # encode
         self.encode(coded_event_t_list.reshape(B,-1))
         T, _ = torch.max(batch['event_list'], dim=1)
-        coded_mesh_t_list = self.code(T.unsqueeze(1) * torch.linspace(0, 1, self.resolution+1).unsqueeze(0))
+        
+        # decode, for both the event list and a mesh (for integration)
+        coded_mesh_t_list = self.code(T.unsqueeze(1) * torch.linspace(0, 1, self.resolution+1).unsqueeze(0).to(coded_event_t_list.device))
         log_event_rate_list = self.decode(coded_event_t_list).squeeze()
         log_mesh_rate_list = self.decode(coded_mesh_t_list).squeeze()
-        loss = -loglikelihood(log_event_rate_list, log_mesh_rate_list, T) + self.lam * torch.norm(self.latent, p=2)
+        
+        # Compute the loss
+        loss = -loglikelihood(log_event_rate_list, log_mesh_rate_list, T) + self.lam_latent * torch.norm(self.latent, p=2)
+        if self.lam_TV > 0:
+            loss += self.lam_TV * loss_TV(log_event_rate_list)
         self.log('train_loss', loss)
         return loss
     
