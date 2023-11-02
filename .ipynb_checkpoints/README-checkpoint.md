@@ -1,9 +1,12 @@
 # ppae
 
+## Successful experiments:
+- RNN encoder: hidden size 64, latent size 10, lam_TV = 0.5, lam_latent = 0.1
+  Resnet decoder
+
 ## Current problem
-- Need to deal with variable length output
 
 ## TODO list
-- Think about MLP structure. Might need convolutional and recurrent layers
-- Some tricks heard from Pavlos' talk on Oct 18 that might worth integrating:
-    - Include smoothness contraint of the rate function into the loss (derivative available from back propagation)
+- Think about adding energy to the simulation
+    - Need some pointers of "fake" events
+- Think about potentialy other types of smoothness penalties
