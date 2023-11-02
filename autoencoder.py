@@ -42,6 +42,19 @@ class NaiveEncoding(nn.Module):
         
     def forward(self, t_list):
         return t_list.unsqueeze(-1)
+    
+def init_weights(m):
+    if type(m) == nn.Linear:
+        nn.init.constant_(m.bias, 0.0)
+        nn.init.kaiming_normal_(m.weight, a=0, mode="fan_in")
+    elif type(m) == nn.LSTM:
+        for name, param in m.named_parameters():
+            if 'weight_ih' in name:
+                nn.init.kaiming_normal_(param.data, a=0, mode="fan_in")
+            elif 'weight_hh' in name:
+                nn.init.orthogonal_(param.data)
+            elif 'bias' in name:
+                nn.init.constant_(param.data, 0.0)
 
 class MLP(nn.Module):
     def __init__(self, input_size, output_size, hidden_size = 64, activation='relu'):
@@ -91,8 +104,7 @@ class ResnetBlockFC(nn.Module):
 
 
         # Init
-        nn.init.constant_(self.fc_0.bias, 0.0)
-        nn.init.kaiming_normal_(self.fc_0.weight, a=0, mode="fan_in")
+        init_weights(self.fc_0)
         nn.init.constant_(self.fc_1.bias, 0.0)
         nn.init.zeros_(self.fc_1.weight)
 
@@ -102,9 +114,8 @@ class ResnetBlockFC(nn.Module):
             self.shortcut = None
         else:
             self.shortcut = nn.Linear(size_in, size_out, bias=False)
-            nn.init.constant_(self.shortcut.bias, 0.0)
-            nn.init.kaiming_normal_(self.shortcut.weight, a=0, mode="fan_in")
-
+            init_weights(self.shortcut)
+            
     def forward(self, x):
         net = self.fc_0(self.activation(x))
         dx = self.fc_1(self.activation(net))
@@ -132,12 +143,10 @@ class ResnetFC(nn.Module):
         super().__init__()
         if d_in > 0:
             self.lin_in = nn.Linear(d_in, d_hidden)
-            nn.init.constant_(self.lin_in.bias, 0.0)
-            nn.init.kaiming_normal_(self.lin_in.weight, a=0, mode="fan_in")
+            init_weights(self.lin_in)
 
         self.lin_out = nn.Linear(d_hidden, d_out)
-        nn.init.constant_(self.lin_out.bias, 0.0)
-        nn.init.kaiming_normal_(self.lin_out.weight, a=0, mode="fan_in")
+        init_weights(self.lin_out)
 
         self.n_blocks = n_blocks
         self.d_in = d_in
@@ -160,13 +169,14 @@ class ResnetFC(nn.Module):
         return out
 
 
-class Autoencoder(pl.LightningModule):
+class AutoencoderFCFixedLength(pl.LightningModule):
     '''
-    Input: Undecided
+    Input: batches of data containing the following:
+        event_list: each event list has fixed length
     Output: the log of the rate function at the query point x.
     '''
     def __init__(self, input_size, latent_size, pe_size, output_size, resolution=128, lam_latent = 0, lam_TV = 0, lam_gradient = 0):
-        super(Autoencoder, self).__init__()
+        super().__init__()
         self.input_size = input_size
         self.latent_size = latent_size
         self.pe_size = pe_size
@@ -228,3 +238,73 @@ class Autoencoder(pl.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
         return optimizer
     
+class AutoencoderRNN(pl.LightningModule):
+    '''
+    Input: batches of data containing the following:
+        event_list: (B, n), where n might change
+    Output: the log of the rate function at the query point x.
+    '''
+    def __init__(self, latent_size, pe_size, output_size, hidden_size=64, resolution=128, lam_latent = 0, lam_TV = 0, lam_gradient = 0):
+        super().__init__()
+        self.latent_size = latent_size
+        self.pe_size = pe_size
+        self.output_size = output_size
+        self.hidden_size = hidden_size
+        
+        self.encoder_lstm = nn.LSTM(input_size=pe_size, hidden_size=self.hidden_size, num_layers=1, batch_first=True)
+        self.encoder_linear = nn.Linear(self.hidden_size, self.latent_size)
+        init_weights(self.encoder_lstm)
+        init_weights(self.encoder_linear)
+        self.decoder = ResnetFC(self.latent_size+self.pe_size, self.output_size)
+        self.code = PositionalEncoding()
+        
+        self.resolution = resolution
+        self.lam_latent = lam_latent
+        self.lam_TV = lam_TV
+        self.lam_gradient = lam_gradient # Gradient loss is more involved.
+    
+    def encode(self, encoder_input):
+        lstm_output, (_, _) = self.encoder_lstm(encoder_input) # (B, latent_size)
+        self.latent = self.encoder_linear(lstm_output[:,-1,:])
+        
+    def decode(self, coded_t_list): # coded_t_list has shape (B, n, pe_size)
+        '''
+        Input: et_list, the positional encoded t_list with shape (B, n, pe_size)
+        Output: log rate function values at those t, with shape (B, n)
+        '''
+        # Broadcast and concat
+        B, n_t, _ = coded_t_list.shape
+        decoder_input = torch.cat((self.latent.unsqueeze(1).expand(B,n_t,-1), coded_t_list), dim=-1)  # (B, n, latent_size+pe_size)
+        return self.decoder(decoder_input)
+    
+    def training_step(self, batch, batch_idx):
+        '''
+        Input: a batch of size B containing the following keys:
+            k: (B,) value of k for step function sources
+            type: (B,) type of sources
+            event_list: (B, n)
+        '''
+        # code t_list
+        event_t_list = batch['event_list']
+        coded_event_t_list = self.code(event_t_list) # (B, n, d)
+        B, n, _ = coded_event_t_list.shape
+        
+        # encode
+        self.encode(coded_event_t_list)
+        T, _ = torch.max(batch['event_list'], dim=1)
+        
+        # decode, for both the event list and a mesh (for integration)
+        coded_mesh_t_list = self.code(T.unsqueeze(1) * torch.linspace(0, 1, self.resolution+1).unsqueeze(0).to(coded_event_t_list.device))
+        log_event_rate_list = self.decode(coded_event_t_list).squeeze()
+        log_mesh_rate_list = self.decode(coded_mesh_t_list).squeeze()
+        
+        # Compute the loss
+        loss = -loglikelihood(log_event_rate_list, batch['mask'], log_mesh_rate_list, T) + self.lam_latent * torch.norm(self.latent, p=2)
+        if self.lam_TV > 0:
+            loss += self.lam_TV * loss_TV(log_event_rate_list)
+        self.log('train_loss', loss)
+        return loss
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
+        return optimizer

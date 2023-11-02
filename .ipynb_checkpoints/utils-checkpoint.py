@@ -1,5 +1,6 @@
 import torch, torchvision
 import pytorch_lightning as pl
+from pytorch_lightning.loggers import TensorBoardLogger
 from torchvision import datasets, transforms
 from torch import nn, optim
 from torch.nn import functional as F
@@ -49,17 +50,18 @@ def loglikelihood_single(log_event_rate_list, log_mesh_rate_list, T):
     integral = 0.5 * (torch.sum(torch.exp(log_mesh_rate_list[1:])) + torch.sum(torch.exp(log_mesh_rate_list[:-1]))) * T / (len(log_mesh_rate_list)-1)
     return torch.sum(log_event_rate_list) - integral
 
-def loglikelihood(log_event_rate_list, log_mesh_rate_list, T):
+def loglikelihood(log_event_rate_list, mask, log_mesh_rate_list, T):
     '''
     log likelihood of a batch of event list with the same length.
     Input:
         event_rate_list: (B, n_event)
+        mask: (B, n_event), if mask == 0 then it's a padding
         mesh_rate_list: (B, n_mesh)
         T: (B,)
     '''
     B, n_mesh = log_mesh_rate_list.shape
     integral = 0.5 * (torch.sum(torch.exp(log_mesh_rate_list[:,1:]), dim=1) + torch.sum(torch.exp(log_mesh_rate_list[:,:-1]), dim=1)) * T / (n_mesh-1)   # (B,)
-    return torch.mean(torch.sum(log_event_rate_list, dim=1) - integral)
+    return torch.mean(torch.sum(log_event_rate_list * mask, dim=1) - integral)
 
 def loss_TV(log_rate_list):
     '''
