@@ -9,6 +9,5 @@
 ## TODO list
 - See if tensorboard is working
 - Pick out outliers from the data
-- Add energy to the AE structure
 - Think about whether we need "fake" events for our simulation
 - Think about potentialy other types of smoothness penalties
