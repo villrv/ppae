@@ -11,6 +11,7 @@ class PositionalEncoding(nn.Module):
         self.num_freqs = num_freqs
         self.freqs = freq_factor * 2.0 ** torch.arange(0, num_freqs) # (num_freqs, )
         self.include_input = include_input
+        self.code_size = 2 * num_freqs + 1 * (self.include_input)
         # f1 f1 f2 f2 ... to multiply x by
         self.register_buffer(
             "_freqs", torch.repeat_interleave(self.freqs, 2).view(1, 1, -1) # (1, 1, 2*num_freqs)
@@ -28,6 +29,24 @@ class PositionalEncoding(nn.Module):
         B, n, _ = t_list.shape
         coded_t_list = t_list[:,:,0:1].repeat(1, 1, self.num_freqs * 2) # (B, n, 2*num_freqs)
         coded_t_list = torch.sin(torch.addcmul(self._phases, coded_t_list, self._freqs))
+        if self.include_input:
+            coded_t_list = torch.cat((t_list[:,:,0:1], coded_t_list), dim=-1)
+        return torch.cat((coded_t_list, t_list[:,:,1:]), dim=-1)
+    
+class DiffEncoding(nn.Module):
+    '''
+    This encoding just append the sequential difference of t to t in the new dimension
+    '''
+    def __init__(self, include_input=True):
+        super().__init__()
+        self.include_input = include_input
+        self.code_size = 1 + 1 * (self.include_input)
+        
+    def forward(self, t_list):
+        B, n, _ = t_list.shape
+        coded_t_list = torch.zeros(B, n, 1).to(t_list.device)
+        coded_t_list[:,:-1,:] = t_list[:,1:,0:1] - t_list[:,:-1,0:1]
+        coded_t_list[coded_t_list <= 0] = torch.min(t_list)
         if self.include_input:
             coded_t_list = torch.cat((t_list[:,:,0:1], coded_t_list), dim=-1)
         return torch.cat((coded_t_list, t_list[:,:,1:]), dim=-1)
@@ -243,37 +262,39 @@ class AutoencoderRNN(pl.LightningModule):
         event_list: (B, n), where n might change
     Output: the log of the rate function at the query point x.
     '''
-    def __init__(self, latent_size, num_freqs_pe, hidden_size=128, E_bins=13, resolution=128, lam_latent = 0, lam_TV = 0, lam_gradient = 0):
+    def __init__(self, latent_size, encoding, hidden_size=128, E_bins=13, resolution=128, lam_latent = 0, lam_TV = 0, lam_gradient = 0, lr=0.001):
         super().__init__()
         self.latent_size = latent_size
-        self.num_freqs_pe = num_freqs_pe
         self.hidden_size = hidden_size
-        self.pe_size = num_freqs_pe*2+1
         self.E_bins = E_bins
-        self.encoder_lstm = nn.LSTM(input_size=self.pe_size+self.E_bins, hidden_size=self.hidden_size, num_layers=1, batch_first=True)
+        self.code = encoding
+        self.code_size = encoding.code_size
+        self.encoder_lstm = nn.LSTM(input_size=self.code_size+self.E_bins, hidden_size=self.hidden_size, num_layers=1, batch_first=True)
         self.encoder_linear = nn.Linear(self.hidden_size, self.latent_size)
         init_weights(self.encoder_lstm)
         init_weights(self.encoder_linear)
-        self.decoder = ResnetFC(self.latent_size+self.pe_size, self.E_bins)
-        self.code = PositionalEncoding(num_freqs_pe)
+        self.decoder = ResnetFC(self.latent_size+self.code_size, self.E_bins)
+
         
         self.resolution = resolution
         self.lam_latent = lam_latent
         self.lam_TV = lam_TV
         self.lam_gradient = lam_gradient # Gradient loss is more involved.
+        
+        self.lr = lr
     
     def encode(self, encoder_input):
         lstm_output, (_, _) = self.encoder_lstm(encoder_input)
         self.latent = self.encoder_linear(lstm_output[:,-1,:]) # (B, latent_size)
         
-    def decode(self, coded_t_list): # coded_t_list has shape (B, n, pe_size)
+    def decode(self, coded_t_list): # coded_t_list has shape (B, n, code_size)
         '''
-        Input: et_list, the positional encoded t_list with shape (B, n, pe_size)
+        Input: et_list, the positional encoded t_list with shape (B, n, code_size)
         Output: log rate function values at those t, with shape (B, n)
         '''
         # Broadcast and concat
         B, n_t, _ = coded_t_list.shape
-        decoder_input = torch.cat((self.latent.unsqueeze(1).expand(B,n_t,-1), coded_t_list), dim=-1)  # (B, n, latent_size+pe_size)
+        decoder_input = torch.cat((self.latent.unsqueeze(1).expand(B,n_t,-1), coded_t_list), dim=-1)  # (B, n, latent_size+code_size)
         return self.decoder(decoder_input)
     
     def training_step(self, batch, batch_idx):
@@ -285,7 +306,7 @@ class AutoencoderRNN(pl.LightningModule):
         '''
         # code t_list
         event_t_list = batch['event_list']
-        coded_event_t_list = self.code(event_t_list) # (B, n, pe_size+E_bins)
+        coded_event_t_list = self.code(event_t_list) # (B, n, code_size+E_bins)
         B, n, _ = coded_event_t_list.shape
         
         # encode
@@ -294,7 +315,7 @@ class AutoencoderRNN(pl.LightningModule):
         
         # decode, for both the event list and a mesh (for integration)
         coded_mesh_t_list = self.code((T.unsqueeze(-1) * torch.linspace(0, 1, self.resolution+1).to(coded_event_t_list.device).unsqueeze(0)).unsqueeze(-1))
-        log_event_rate_list = self.decode(coded_event_t_list[:,:,:self.pe_size]) # (B, n, E_bins)
+        log_event_rate_list = self.decode(coded_event_t_list[:,:,:self.code_size]) # (B, n, E_bins)
         log_mesh_rate_list = self.decode(coded_mesh_t_list) # (B, n, E_bins)
         
         # Compute the loss
@@ -305,5 +326,5 @@ class AutoencoderRNN(pl.LightningModule):
         return loss
     
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         return optimizer

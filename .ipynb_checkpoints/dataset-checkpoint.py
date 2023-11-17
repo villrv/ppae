@@ -1,5 +1,6 @@
 from utils import *
 from torch.nn.utils.rnn import pad_sequence
+import pandas as pd
 
 def poisson_process_with_count(lam, n):
     '''This function samples a Poisson process with rate lambda until n arrivals'''
@@ -50,13 +51,14 @@ class RealEventsDataset(torch.utils.data.Dataset):
     The class that handles real dataset. 
     Input should be a list of dictionary, each dictionary is a source, containing 'event_list', and other keys
     '''
-    def __init__(self, lst, E_min=500, E_max=7000, E_bins=13):
+    def __init__(self, lst, E_min=500, E_max=7000, E_bins=13, t_scale = 5000):
         # Each entry of the list below should be a dictionary containing the event list, the source type label, and potentially the hyperparameters of the source
         self.data = [None] * len(lst)
         for i in range(len(lst)):
             d = lst[i]
             d['event_list'] = onehot_code_energy(d['event_list'], E_min=E_min, E_max=E_max, E_bins=E_bins)
-            d['event_list'][:,0] = d['event_list'][:,0] - np.min(d['event_list'][:,0])
+            d['event_list'][:,0] = (d['event_list'][:,0] - np.min(d['event_list'][:,0])) / t_scale
+            d['event_list'] = torch.tensor(d['event_list']).float()
             d['event_list_len'] = len(d['event_list'])
             self.data[i] = d
         
@@ -131,7 +133,7 @@ def padding_collate_fn(batch):
     superbatch = {}
     for key in batch[0].keys():
         if key == 'event_list':
-            superbatch[key] = pad_sequence([x[key] for x in batch], batch_first=True, padding_value=-10) # (B, n, E_bins+1)
+            superbatch[key] = pad_sequence([x[key] for x in batch], batch_first=True, padding_value=-500) # (B, n, E_bins+1)
         else:
             superbatch[key] = torch.tensor([x[key] for x in batch])
             

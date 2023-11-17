@@ -7,7 +7,6 @@
 ## Current problem
 
 ## TODO list
-- See if tensorboard is working
 - Pick out outliers from the data
 - Think about whether we need "fake" events for our simulation
 - Think about potentialy other types of smoothness penalties
