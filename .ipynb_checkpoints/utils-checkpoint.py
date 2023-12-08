@@ -54,6 +54,8 @@ class DisabledSLURMEnvironment(SLURMEnvironment):
 def loglikelihood(log_event_rate_list, T_mask, E_mask, log_mesh_rate_list, T):
     '''
     log likelihood of a batch of event list with the same length.
+        r(t1) * ... * r(tn) * exp(-integral(r(t)))
+    We take the log likelihood for better computational performance
     Input:
         log_event_rate_list: (B, n_event, E_bins)
         T_mask: (B, n_event), if mask == 0 then it's a padding
@@ -62,7 +64,7 @@ def loglikelihood(log_event_rate_list, T_mask, E_mask, log_mesh_rate_list, T):
         T: (B,)
     '''
     B, n_mesh, E_bins = log_mesh_rate_list.shape
-    integral = 0.5 * (torch.sum(torch.exp(log_mesh_rate_list[:,1:,:]), dim=(1,2)) + torch.sum(torch.exp(log_mesh_rate_list[:,:-1,:]), dim=(1,2))) * T / E_bins / (n_mesh-1)   # (B,)
+    integral = 0.5 * (torch.sum(torch.exp(log_mesh_rate_list[:,1:,:]), dim=(1,2)) + torch.sum(torch.exp(log_mesh_rate_list[:,:-1,:]), dim=(1,2))) * T / (n_mesh-1)   # (B,)
     return torch.mean(torch.sum(log_event_rate_list * T_mask.unsqueeze(-1) * E_mask, dim=(1,2)) - integral)
 
 def loss_TV(log_rate_list):
@@ -71,4 +73,4 @@ def loss_TV(log_rate_list):
     Input:
         log_rate_list: (B, n, E_bins)
     '''
-    return torch.mean(torch.sum(torch.abs(log_rate_list[:,1:,:] - log_rate_list[:,:-1,:]), dim=1))
+    return torch.mean(torch.sum(torch.abs(log_rate_list[:,1:,:] - log_rate_list[:,:-1,:]), dim=(1,2)))

@@ -33,23 +33,23 @@ class PositionalEncoding(nn.Module):
             coded_t_list = torch.cat((t_list[:,:,0:1], coded_t_list), dim=-1)
         return torch.cat((coded_t_list, t_list[:,:,1:]), dim=-1)
     
-class DiffEncoding(nn.Module):
-    '''
-    This encoding just append the sequential difference of t to t in the new dimension
-    '''
-    def __init__(self, include_input=True):
-        super().__init__()
-        self.include_input = include_input
-        self.code_size = 1 + 1 * (self.include_input)
+# class DiffEncoding(nn.Module):
+#     '''
+#     This encoding just append the sequential difference of t to t in the new dimension
+#     '''
+#     def __init__(self, include_input=True):
+#         super().__init__()
+#         self.include_input = include_input
+#         self.code_size = 1 + 1 * (self.include_input)
         
-    def forward(self, t_list):
-        B, n, _ = t_list.shape
-        coded_t_list = torch.zeros(B, n, 1).to(t_list.device)
-        coded_t_list[:,:-1,:] = t_list[:,1:,0:1] - t_list[:,:-1,0:1]
-        coded_t_list[coded_t_list <= 0] = torch.min(t_list)
-        if self.include_input:
-            coded_t_list = torch.cat((t_list[:,:,0:1], coded_t_list), dim=-1)
-        return torch.cat((coded_t_list, t_list[:,:,1:]), dim=-1)
+#     def forward(self, t_list):
+#         B, n, _ = t_list.shape
+#         coded_t_list = torch.zeros(B, n, 1).to(t_list.device)
+#         coded_t_list[:,:-1,:] = t_list[:,1:,0:1] - t_list[:,:-1,0:1]
+#         coded_t_list[coded_t_list <= 0] = torch.min(t_list)
+#         if self.include_input:
+#             coded_t_list = torch.cat((t_list[:,:,0:1], coded_t_list), dim=-1)
+#         return torch.cat((coded_t_list, t_list[:,:,1:]), dim=-1)
 
 # class NaiveEncoding(nn.Module):
 #     '''
@@ -185,6 +185,36 @@ class ResnetFC(nn.Module):
             
         out = self.lin_out(self.activation(x))
         return out
+    
+class TransformerEncoder(nn.Module):
+    def __init__(self, d_input, d_model, nhead, num_encoder_layers, d_latent, dim_feedforward, dropout=0.1):
+        super().__init__()
+        
+        # Transformer Encoder
+        self.input_linear = nn.Linear(d_input, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, 
+                                                   dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+        self.output_linear = nn.Linear(d_model, d_latent)
+
+    def forward(self, src, src_key_padding_mask):
+        '''
+        src has dimension: (B, n, k)
+        mask has dimension: (B, n)
+        '''
+        src = self.input_linear(src)
+        output = self.transformer_encoder(src, src_key_padding_mask=src_key_padding_mask)
+        output = self.output_linear(output)  # (B, n, d_latent)
+
+        # Average Pooling
+        # Use the mask to exclude padding for averaging
+        mask_expanded = src_key_padding_mask.unsqueeze(-1).expand(-1, -1, output.shape[-1])
+        masked_output = output.masked_fill(mask_expanded, 0)
+        sum_output = torch.sum(masked_output, dim=1)
+        num_tokens = torch.sum(~src_key_padding_mask, dim=1, keepdim=True)
+        latent = sum_output / num_tokens
+
+        return latent
 
 
 # class AutoencoderFCFixedLength(pl.LightningModule):
@@ -262,7 +292,7 @@ class AutoencoderRNN(pl.LightningModule):
         event_list: (B, n), where n might change
     Output: the log of the rate function at the query point x.
     '''
-    def __init__(self, latent_size, encoding, hidden_size=128, E_bins=13, resolution=128, lam_latent = 0, lam_TV = 0, lam_gradient = 0, lr=0.001):
+    def __init__(self, latent_size, encoding, hidden_size=128, E_bins=13, resolution=4096, lam_latent = 0, lam_TV = 0, lam_gradient = 0, lr=0.001):
         super().__init__()
         self.latent_size = latent_size
         self.hidden_size = hidden_size
@@ -273,7 +303,7 @@ class AutoencoderRNN(pl.LightningModule):
         self.encoder_linear = nn.Linear(self.hidden_size, self.latent_size)
         init_weights(self.encoder_lstm)
         init_weights(self.encoder_linear)
-        self.decoder = ResnetFC(self.latent_size+self.code_size, self.E_bins)
+        self.decoder = ResnetFC(self.latent_size+self.code_size, self.E_bins, d_hidden=self.hidden_size)
 
         
         self.resolution = resolution
@@ -311,6 +341,77 @@ class AutoencoderRNN(pl.LightningModule):
         
         # encode
         self.encode(coded_event_t_list)
+        T, _ = torch.max(event_t_list[:,:,0], dim=1)
+        
+        # decode, for both the event list and a mesh (for integration)
+        coded_mesh_t_list = self.code((T.unsqueeze(-1) * torch.linspace(0, 1, self.resolution+1).to(coded_event_t_list.device).unsqueeze(0)).unsqueeze(-1))
+        # print(coded_mesh_t_list.shape)
+        # print(coded_event_t_list.shape)
+        log_event_rate_list = self.decode(coded_event_t_list[:,:,:self.code_size]) # (B, n, E_bins)
+        log_mesh_rate_list = self.decode(coded_mesh_t_list) # (B, n, E_bins)
+        
+        # Compute the loss
+        loss = -loglikelihood(log_event_rate_list, batch['mask'], event_t_list[:,:,-self.E_bins:], log_mesh_rate_list, T) + self.lam_latent * torch.norm(self.latent, p=2)
+        if self.lam_TV > 0:
+            loss += self.lam_TV * loss_TV(log_event_rate_list)
+        self.log('train_loss', loss, prog_bar=True)
+        return loss
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        return optimizer
+    
+class AutoencoderTransformer(pl.LightningModule):
+    '''
+    Input: batches of data containing the following:
+        event_list: (B, n, k), where n is the event list length that might change, and k is the dimension of each event, containing the positional encoding and the energy one-hot encoding
+    Output: the log of the rate function at the query point x.
+    '''
+    def __init__(self, latent_size, encoding, hidden_size=128, E_bins=13, d_encoder_model=32, nhead=4, num_encoder_layers=1, resolution=4096, lam_latent = 0, lam_TV = 0, lam_gradient = 0, lr=0.001):
+        super().__init__()
+        self.latent_size = latent_size
+        self.hidden_size = hidden_size
+        self.E_bins = E_bins
+        self.code = encoding
+        self.code_size = encoding.code_size
+        self.encoder = TransformerEncoder(self.code_size+self.E_bins, d_model=d_encoder_model, nhead=nhead, num_encoder_layers=num_encoder_layers, d_latent=latent_size, dim_feedforward=128, dropout=0.1)
+        # Weight initialization?
+        self.decoder = ResnetFC(self.latent_size+self.code_size, self.E_bins, d_hidden=self.hidden_size)
+
+        
+        self.resolution = resolution
+        self.lam_latent = lam_latent
+        self.lam_TV = lam_TV
+        self.lam_gradient = lam_gradient # Gradient loss is more involved.
+        
+        self.lr = lr
+    
+    def encode(self, encoder_input, mask):
+        self.latent = self.encoder(encoder_input, mask) # (B, latent_size)
+        
+    def decode(self, coded_t_list): # coded_t_list has shape (B, n, code_size)
+        '''
+        Input: et_list, the positional encoded t_list with shape (B, n, code_size)
+        Output: log rate function values at those t, with shape (B, n)
+        '''
+        # Broadcast and concat
+        B, n_t, _ = coded_t_list.shape
+        decoder_input = torch.cat((self.latent.unsqueeze(1).expand(B,n_t,-1), coded_t_list), dim=-1)  # (B, n, latent_size+code_size)
+        return self.decoder(decoder_input)
+    
+    def training_step(self, batch, batch_idx):
+        '''
+        Input: a batch of size B containing the following keys:
+            event_list: (B, n, k)
+            mask: (B, n)
+        '''
+        # code t_list
+        event_t_list = batch['event_list']
+        coded_event_t_list = self.code(event_t_list) # (B, n, code_size+E_bins)
+        B, n, _ = coded_event_t_list.shape
+        
+        # encode
+        self.encode(coded_event_t_list, ~batch['mask'])
         T, _ = torch.max(event_t_list[:,:,0], dim=1)
         
         # decode, for both the event list and a mesh (for integration)
