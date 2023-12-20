@@ -140,3 +140,6 @@ def padding_collate_fn(batch):
     # Create a mask
     superbatch['mask'] = torch.arange(torch.max(superbatch['event_list_len'])).expand(len(batch), -1) < superbatch['event_list_len'].unsqueeze(1) # (B, n)
     return superbatch
+
+
+    

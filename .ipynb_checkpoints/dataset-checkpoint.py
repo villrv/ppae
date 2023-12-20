@@ -140,3 +140,16 @@ def padding_collate_fn(batch):
     # Create a mask
     superbatch['mask'] = torch.arange(torch.max(superbatch['event_list_len'])).expand(len(batch), -1) < superbatch['event_list_len'].unsqueeze(1) # (B, n)
     return superbatch
+
+def output_collate_fn(outputs):
+    '''
+    Outputs is a list of dic
+    '''
+    output = {}
+    for key in outputs[0].keys():
+        if key == 'latent':
+            output[key] = torch.cat([o[key] for o in outputs], dim=0)
+        else:
+            output[key] = [o[key] for o in outputs]
+    return output
+    

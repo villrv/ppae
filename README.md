@@ -1,11 +1,9 @@
 # ppae
 
-## Successful experiments:
-- RNN encoder: hidden size 64, latent size 10, lam_TV = 0.5, lam_latent = 0.1
-  Resnet decoder
+## Training details on the dataset of 1000 eventfiles:
+- TransformerAutoencoder, num_freqs=12, num_latent=30, lam_TV=0.3, d_encoder_model=32, num_head=4, d_encoder_feedforward=128, d_decoder_hidden=256, loss=-1075 
 
 ## Current problem
 
 ## TODO list
-- Think about whether we need "fake" events for our simulation
-- Think about potentialy other types of smoothness penalties
+

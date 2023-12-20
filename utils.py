@@ -39,6 +39,14 @@ class DisabledSLURMEnvironment(SLURMEnvironment):
     @staticmethod
     def _validate_srun_variables() -> None:
         return
+    
+def todevice(x, device):
+    if isinstance(x,dict):
+        for k, v in x.items():
+            x[k] = x[k].to(device)
+    else:
+        x = x.to(device)
+    return x
 
 
 # def loglikelihood_single(log_event_rate_list, log_mesh_rate_list, T):
