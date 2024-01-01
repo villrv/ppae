@@ -77,8 +77,8 @@ def loglikelihood(log_event_rate_list, T_mask, E_mask, log_mesh_rate_list, T):
 
 def loss_TV(log_rate_list):
     '''
-    Calculate total variation for a log rate list
+    Calculate total variation for a log rate list. The absolute value of the first entry is calculated twice
     Input:
         log_rate_list: (B, n, E_bins)
     '''
-    return torch.mean(torch.sum(torch.abs(log_rate_list[:,1:,:] - log_rate_list[:,:-1,:]), dim=(1,2)))
+    return torch.mean(torch.sum(torch.abs(log_rate_list[:,1:,:] - log_rate_list[:,:-1,:]), dim=(1,2)) + torch.sum(torch.abs(log_rate_list[:,0:1,:]), dim=(1,2)))

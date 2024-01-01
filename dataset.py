@@ -60,6 +60,7 @@ class RealEventsDataset(torch.utils.data.Dataset):
             d['event_list'][:,0] = (d['event_list'][:,0] - np.min(d['event_list'][:,0])) / t_scale
             d['event_list'] = torch.tensor(d['event_list']).float()
             d['event_list_len'] = len(d['event_list'])
+            d['idx'] = i
             self.data[i] = d
         
     def __len__(self):
@@ -67,38 +68,6 @@ class RealEventsDataset(torch.utils.data.Dataset):
         
     def __getitem__(self, idx):
         return self.data[idx]
-    
-# class StepFunctionEventsDatasetFixedLength(BaseEventsDataset):
-#     '''
-#     This class generates event lists from sources of the following type: Pos(10) for 0 <= t < 1, Pos(20/k) for 1 <= t < 1+k, and Pos(10) afterwards. It generate 40 arrivals and stops. The input k_list provides k values for different sources.
-#     '''
-#     def __init__(self, N, k_set):
-#         super().__init__(N)
-        
-#         k_set = torch.tensor(k_set)
-        
-#         # Generate source types
-#         type_list = torch.randint(0,len(k_set), (N,))
-#         k_list = k_set[type_list]
-        
-#         for i in range(N):
-#             d = {}
-#             k = k_list[i]
-#             d['k'] = k
-#             d['type'] = type_list[i]
-            
-#             # Generate an event list
-#             while True:
-#                 l1 = poisson_process_with_time(10, 1)
-#                 if len(l1) > 40:
-#                     continue
-#                 l2 = poisson_process_with_time(20.0/k, k)
-#                 if len(l1) + len(l2) > 40:
-#                     continue
-#                 l3 = poisson_process_with_count(10,40-len(l1)-len(l2))
-#                 d['event_list'] = torch.concat((torch.tensor(l1),1+torch.tensor(l2),1+k+torch.tensor(l3))).float()
-#                 break
-#             self.data[i] = d
             
 class StepFunctionEventsDatasetFixedTime(BaseEventsDataset):
     '''
@@ -133,7 +102,7 @@ def padding_collate_fn(batch):
     superbatch = {}
     for key in batch[0].keys():
         if key == 'event_list':
-            superbatch[key] = pad_sequence([x[key] for x in batch], batch_first=True, padding_value=-5000) # (B, n, E_bins+1)
+            superbatch[key] = pad_sequence([x[key] for x in batch], batch_first=True, padding_value=0) # (B, n, E_bins+1)
         else:
             superbatch[key] = torch.tensor([x[key] for x in batch])
             

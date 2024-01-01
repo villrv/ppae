@@ -1,9 +1,20 @@
 # ppae
 
-## Training details on the dataset of 1000 eventfiles:
-- TransformerAutoencoder, num_freqs=12, num_latent=30, lam_TV=0.3, d_encoder_model=32, num_head=4, d_encoder_feedforward=128, d_decoder_hidden=256, loss=-1075 
+## Training feedbacks on the dataset of 1000 eventfiles
+### What worked
+- TV loss should be on mesh rates and lam_TV should be 0.2.
 
-## Current problem
+### What did not work
+- Include time difference in encoding
+- More layers of LSTM
+- Concatenating last output with global pooled output for LSTM
+- Increase to 48 token size for vanilla transformer
 
-## TODO list
+## What did work
+- Longer training time: 800 epochs with a patience of 100
+- Bigger LSTM network
+- LSTM used last non-padded output
+- TV loss for mesh, also added first occurrence
 
+## further tuning ideas:
+- Learnable positional encoding
