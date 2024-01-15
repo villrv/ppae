@@ -43,8 +43,10 @@ class DisabledSLURMEnvironment(SLURMEnvironment):
 def todevice(x, device):
     if isinstance(x,dict):
         for k, v in x.items():
-            x[k] = x[k].to(device)
-    else:
+            x[k] = todevice(x[k], device)
+    elif isinstance(x,list):
+        x = [todevice(i, device) for i in x]
+    elif not isinstance(x,str):
         x = x.to(device)
     return x
 

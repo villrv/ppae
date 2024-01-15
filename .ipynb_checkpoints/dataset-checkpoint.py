@@ -103,6 +103,8 @@ def padding_collate_fn(batch):
     for key in batch[0].keys():
         if key == 'event_list':
             superbatch[key] = pad_sequence([x[key] for x in batch], batch_first=True, padding_value=0) # (B, n, E_bins+1)
+        elif isinstance(batch[0][key], str):
+            superbatch[key] = [x[key] for x in batch]
         else:
             superbatch[key] = torch.tensor([x[key] for x in batch])
             
