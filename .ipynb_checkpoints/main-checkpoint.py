@@ -1,5 +1,7 @@
 import sys
 import os
+import json
+import logging
 import configargparse
 root_dir = "/nobackup/users/yankeson/Astronomy" 
 sys.path.insert(0, f"{root_dir}/ppae/")
@@ -24,6 +26,7 @@ if __name__ == "__main__":
                    help='Penalty for total variation')
     p.add_argument('--model_type', type=str, required=True,
                    help='Type of the model. decoder: decoder only. lstm: lstm encoder. transformer: vanilla transformer encoder')
+    
     
     # Important ones (but with default values)
     
@@ -76,6 +79,19 @@ if __name__ == "__main__":
     opt = p.parse_args()
     os.chdir(root_dir)
     
+    folder_path = f'{root_dir}/experiments/{opt.model_name}'
+    
+
+    # Create the folder if it does not exist
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+    
+    # Create relevant folder
+    with open(f'{folder_path}/arguments.json', 'w') as file:
+        json.dump(vars(opt), file)
+        
+    logging.basicConfig(filename=f'{folder_path}/logfile.log')
+    
     #### Load data
     # Load dataframes
     true_flares_df = pd.read_csv(f'{root_dir}/Chandra_data/trueflares.csv')
@@ -116,21 +132,21 @@ if __name__ == "__main__":
     trainer = pl.Trainer(max_epochs=opt.num_epochs, 
                          accelerator=device, 
                          devices=1, 
-                         plugins=[DisabledSLURMEnvironment(auto_requeue=False)], 
-                         log_every_n_steps=2)
+                         plugins=[DisabledSLURMEnvironment(auto_requeue=False)],
+                         log_every_n_steps = 2)
     history = trainer.fit(model, loader)
-    torch.save(model.state_dict(), f'{root_dir}/models/{opt.model_name}.pth')
+    torch.save(model.state_dict(), f'{folder_path}/model.pth')
     
     # Plot training history
     plt.figure(figsize=(12,9))
     plt.plot(torch.arange(opt.num_epochs), [l.cpu().detach() for l in model.losses])
     plt.ylim([-1200,-600]);
-    plt.savefig(f'{root_dir}/plots/training_history_{opt.model_name}.png')
+    plt.savefig(f'{folder_path}/training_history.png')
     
     
     ################ Inference
     # Test data, currently just the training data
-    model.load_state_dict(torch.load(f'{root_dir}/models/{opt.model_name}.pth'))
+    model.load_state_dict(torch.load(f'{folder_path}/model.pth'))
     model.to(device)
     test_loader = DataLoader(data, batch_size=16, collate_fn=padding_collate_fn)
     outputs = []
@@ -156,7 +172,7 @@ if __name__ == "__main__":
         plt.plot(times, torch.sum(rates,dim=-1))
     plt.suptitle('Fitted vs true total rates',size=20)
     plt.tight_layout()
-    plt.savefig(f'{root_dir}/plots/total_rates_{opt.model_name}.png')
+    plt.savefig(f'{folder_path}/total_rates.png')
 
     # Rate for a specific bin
     plt.figure(figsize=(12,9))
@@ -176,5 +192,5 @@ if __name__ == "__main__":
         plt.plot(times, rates)
     plt.suptitle(f'Fitted vs true total rates for energy bin {E_index+1}',size=20)
     plt.tight_layout()
-    plt.savefig(f'{root_dir}/plots/sub_rates_E{E_index+1}_{opt.model_name}.png')
+    plt.savefig(f'{folder_path}/sub_rates_E{E_index+1}.png')
     

@@ -50,17 +50,6 @@ def todevice(x, device):
         x = x.to(device)
     return x
 
-
-# def loglikelihood_single(log_event_rate_list, log_mesh_rate_list, T):
-#     '''
-#     Likelihood of an event list (t1,...,tn) with Poisson rate function r(t) is:
-#         r(t1) * ... * r(tn) * exp(-integral(r(t)))
-#     We take the log likelihood for better computational performance
-#     log likelihood of a single event list. Needed when we hav event lists of different length
-#     '''
-#     integral = 0.5 * (torch.sum(torch.exp(log_mesh_rate_list[1:])) + torch.sum(torch.exp(log_mesh_rate_list[:-1]))) * T / (len(log_mesh_rate_list)-1)
-#     return torch.sum(log_event_rate_list) - integral
-
 def loglikelihood(log_event_rate_list, T_mask, E_mask, log_mesh_rate_list, T):
     '''
     log likelihood of a batch of event list with the same length.
@@ -84,3 +73,7 @@ def loss_TV(log_rate_list):
         log_rate_list: (B, n, E_bins)
     '''
     return torch.mean(torch.sum(torch.abs(log_rate_list[:,1:,:] - log_rate_list[:,:-1,:]), dim=(1,2)) + torch.sum(torch.abs(log_rate_list[:,0:1,:]), dim=(1,2)))
+
+def visualize_hist(times, t_scale):
+    times = times / t_scale
+    plt.hist(times, bins = torch.arange(torch.ceil(torch.max(times))))
