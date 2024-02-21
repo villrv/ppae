@@ -66,6 +66,13 @@ def init_weights(m):
             elif 'bias' in name:
                 nn.init.constant_(param.data, 0.0)
 
+def lstm_forget_gate_init(lstm_layer):
+    for name, parameter in lstm_layer.named_parameters():
+        if not "bias" in name: continue
+        n = parameter.size(0)
+        start, end = n // 4, n // 2
+        parameter.data[start:end].fill_(1.)
+
 # class MLP(nn.Module):
 #     def __init__(self, input_size, output_size, hidden_size = 64, activation='relu'):
 #         super().__init__()
@@ -94,7 +101,7 @@ class ResnetBlockFC(nn.Module):
     Comment: we are using pre-activation (activation before dense layers), mainly to allow flexible output activation when putting these layers together.
     """
 
-    def __init__(self, size_in, size_out=None, size_h=None, activation='ReLU'):
+    def __init__(self, size_in, size_h = None, size_out = None, activation='ReLU'):
         super().__init__()
         
         # Attributes
@@ -111,7 +118,9 @@ class ResnetBlockFC(nn.Module):
         # Submodules
         self.fc_0 = nn.Linear(size_in, size_h)
         self.fc_1 = nn.Linear(size_h, size_out)
-
+        
+        # self.bn1 = nn.BatchNorm1d(size_in)
+        # self.bn2 = nn.BatchNorm1d(size_h)
 
         # Init
         init_weights(self.fc_0)
@@ -132,6 +141,8 @@ class ResnetBlockFC(nn.Module):
     def forward(self, x):
         net = self.fc_0(self.activation(x))
         dx = self.fc_1(self.activation(net))
+        # net = self.fc_0(self.activation(self.bn1(x)))
+        # dx = self.fc_1(self.activation(self.bn2(net)))
 
         if self.shortcut is not None:
             x_s = self.shortcut(x)
@@ -220,6 +231,9 @@ class LSTMEncoder(nn.Module):
         super().__init__()
         self.lstm = nn.LSTM(input_size=d_input, hidden_size=d_hidden, num_layers=n_layers, batch_first=True)
         self.linear = nn.Linear(d_hidden, d_output)
+        # init_weights(self.linear)
+        # init_weights(self.lstm)
+        # lstm_forget_gate_init(self.lstm)
         
     def forward(self, src, src_lengths):
         src_packed = pack_padded_sequence(src, src_lengths.cpu().to(torch.int64), batch_first=True)
@@ -241,7 +255,7 @@ class AutoEncoder(pl.LightningModule):
         event_list: (B, n, k), where n is the event list length that might change, and k is the dimension of each event, containing the positional encoding and the energy one-hot encoding
     Output: the log of the rate function at the query point x.
     '''
-    def __init__(self, model_type, latent_size, encoding, latent_num=947, hidden_size=128, E_bins=13, resolution=4096, lam_latent = 0, lam_TV = 0, lam_gradient = 0, d_encoder_model=32, nhead=4, num_encoder_layers=1, dim_feedforward=128, lr=1e-3):
+    def __init__(self, model_type, latent_size, encoding, latent_num=947, hidden_size=128, E_bins=14, resolution=4096, lam_latent = 0, lam_TV = 0, lam_gradient = 0, d_encoder_model=32, nhead=4, num_encoder_layers=1, dim_feedforward=128, lr=1e-3):
         super().__init__()
         self.model_type=model_type
         self.latent_num = latent_num
@@ -326,7 +340,12 @@ class AutoEncoder(pl.LightningModule):
     
     
     def on_train_epoch_end(self):
-        self.losses.append(torch.stack(self.losses_in_epoch).mean())
+        self.tensor_losses_in_epoch = torch.stack(self.losses_in_epoch)
+        if torch.isnan(self.tensor_losses_in_epoch).any():
+            print('This epoch has nan loss')
+        elif torch.isinf(self.tensor_losses_in_epoch).any():
+            print('This epoch has inf loss')
+        self.losses.append(self.tensor_losses_in_epoch.nanmean())
         self.losses_in_epoch.clear()
         
     def forward(self, batch):
@@ -365,5 +384,50 @@ class AutoEncoder(pl.LightningModule):
             'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50, verbose=True),
             'interval': 'epoch',
             'monitor': 'train_loss'
+            
         }
         return [optimizer], [scheduler]
+    
+    def on_after_backward(self):
+        """
+        Check for NaN or infinite gradients after the backward pass and zero them out.
+        This approach prevents optimizer steps with unstable gradients.
+        """
+        valid_gradients = True
+        for name, param in self.named_parameters():
+            if param.grad is not None:
+                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                    print(f"Detected {'nan' if torch.isnan(param.grad).any() else 'inf'} in gradients for {name}")
+                    valid_gradients = False
+                    break  # Exit early if any invalid gradient is found
+
+        if not valid_gradients:
+            print("Invalid gradients detected, zeroing gradients")
+            # Zero out all gradients to prevent the optimizer step with unstable gradients
+            self.zero_grad(set_to_none=True)  # Use `set_to_none=True` for a more efficient zeroing
+
+#     def optimizer_step(
+#         self,
+#         *args, **kwargs
+#     ):
+#         """
+#         Skipping updates in case of unstable gradients
+#         https://github.com/Lightning-AI/lightning/issues/4956
+#         """
+#         valid_gradients = True
+#         for name, param in self.named_parameters():
+#             if param.grad is not None:
+#                 if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+#                     print(f"Detected {'nan' if torch.isnan(param.grad).any() else 'inf'} in gradients for {name}")
+#                     valid_gradients = False
+#                     break
+#         if not valid_gradients:
+#             print("Skipping step due to invalid gradients")
+#             self.zero_grad()  # Zero gradients to skip the step
+#         else:
+#             optimizer_closure = kwargs.get("optimizer_closure", None)
+#             if optimizer_closure is not None:
+#                 optimizer_closure()
+
+#             # Proceed with the original optimizer step
+#             super().optimizer_step(*args, **kwargs)

@@ -24,13 +24,12 @@ def poisson_process_with_time(lam, T):
     else:
         return []
     
-def onehot_code_energy(lst, E_min=500, E_max=7000, E_bins=13):
+def onehot_code_energy(lst, E_grid):
     '''
     This function takes in a list of eventlists. Each eventlist has shape (n_i, 2) where the second column contains evergy.
     The function one-hot encode the energy into E_bins number of bins and concat that to the original first column (time).
     '''
-    bin_edges = np.linspace(E_min, E_max, E_bins+1)
-    return np.concatenate((lst[:,0:1], np.eye(E_bins)[np.digitize(lst[:,1], bin_edges)-1]), axis = 1)
+    return np.concatenate((lst[:,0:1], np.eye(len(E_grid)-1)[np.digitize(lst[:,1], E_grid)-1]), axis = 1)
 
 class BaseEventsDataset(torch.utils.data.Dataset):
     '''
@@ -51,13 +50,23 @@ class RealEventsDataset(torch.utils.data.Dataset):
     The class that handles real dataset. 
     Input should be a list of dictionary, each dictionary is a source, containing 'event_list', and other keys
     '''
-    def __init__(self, lst, E_min=500, E_max=7000, E_bins=13, t_scale = 500):
+    def __init__(self, lst, E_min=500, E_max=7000, E_bins=14, t_scale = 500, random_shift=False):
         # Each entry of the list below should be a dictionary containing the event list, the source type label, and potentially the hyperparameters of the source
         self.data = [None] * len(lst)
         for i in range(len(lst)):
             d = lst[i]
-            d['event_list'] = onehot_code_energy(d['event_list'], E_min=E_min, E_max=E_max, E_bins=E_bins)
+            if E_bins != 14:
+                E_grid = np.linspace(E_min, E_max, E_bins+1)
+            else:
+                E_grid = np.asarray([5,8.5,12,16,20,25,30,35,40,45,50,55,60,65,70]) * 100
+            d['event_list'] = onehot_code_energy(d['event_list'], E_grid)
             d['event_list'][:,0] = (d['event_list'][:,0] - np.min(d['event_list'][:,0])) / t_scale
+            if random_shift:
+                T = np.max(d['event_list'][:,0])
+                shift = np.random.uniform(0, d['event_list'][1,0] - d['event_list'][0,0])
+                d['event_list'][:,0] = d['event_list'][:,0] + shift
+                temp_ind = np.where(d['event_list'][:,0] <= T)[0]
+                d['event_list'] = d['event_list'][temp_ind,:]
             d['event_list'] = torch.tensor(d['event_list']).float()
             d['event_list_len'] = len(d['event_list'])
             d['idx'] = i
