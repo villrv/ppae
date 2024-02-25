@@ -330,8 +330,8 @@ class AutoEncoder(pl.LightningModule):
         # Compute the loss
         loss = -loglikelihood(log_event_rate_list, batch['mask'], event_t_list[:,:,-self.E_bins:], log_mesh_rate_list, T) + self.lam_latent * torch.norm(self.latent, p=2)
         if self.lam_TV > 0:
-            # loss += self.lam_TV * loss_TV(log_event_rate_list)
-            loss += self.lam_TV * loss_TV(log_mesh_rate_list)
+            # loss += self.lam_TV * loss_TV(torch.exp(log_event_rate_list))
+            loss += self.lam_TV * loss_TV(torch.exp(log_mesh_rate_list))
             
         self.log('train_loss', loss, prog_bar=True)
         self.losses_in_epoch.append(loss)

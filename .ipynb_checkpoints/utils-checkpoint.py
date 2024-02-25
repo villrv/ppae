@@ -66,13 +66,13 @@ def loglikelihood(log_event_rate_list, T_mask, E_mask, log_mesh_rate_list, T):
     integral = 0.5 * (torch.sum(torch.exp(log_mesh_rate_list[:,1:,:]), dim=(1,2)) + torch.sum(torch.exp(log_mesh_rate_list[:,:-1,:]), dim=(1,2))) * T / (n_mesh-1)   # (B,)
     return torch.mean(torch.sum(log_event_rate_list * T_mask.unsqueeze(-1) * E_mask, dim=(1,2)) - integral)
 
-def loss_TV(log_rate_list):
+def loss_TV(rate_list):
     '''
     Calculate total variation for a log rate list. The absolute value of the first entry is calculated twice
     Input:
         log_rate_list: (B, n, E_bins)
     '''
-    return torch.mean(torch.sum(torch.abs(log_rate_list[:,1:,:] - log_rate_list[:,:-1,:]), dim=(1,2)) + torch.sum(torch.abs(log_rate_list[:,0:1,:]), dim=(1,2)))
+    return torch.mean(torch.sum(torch.abs(rate_list[:,1:,:] - rate_list[:,:-1,:]), dim=(1,2)))
 
 def visualize_hist(times, t_scale):
     times = times / t_scale

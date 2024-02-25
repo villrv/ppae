@@ -36,6 +36,8 @@ if __name__ == "__main__":
     # Important ones (but with default values)
     p.add_argument('--random_shift', action='store_true',
                help='Whether to random shift the first event in the dataset')
+    p.add_argument('--filter', action='store_true',
+               help='Whether to filter the large dataset for balance')
     p.add_argument('--B', type=int, default=64, required=False,
                    help='Batch size')
     p.add_argument('--lr', type=float, default=0.001, required=False,
@@ -69,7 +71,7 @@ if __name__ == "__main__":
                    help='Number of workers')
     p.add_argument('--E_bins', type=int, default=13, required=False,
                    help='Number of energy bins to discretize for')
-    p.add_argument('--plotting_t_scale', type=int, default=10, required=False,
+    p.add_argument('--plotting_nbins', type=int, default=100, required=False,
                    help='Scale to normalize times for plottng')
     p.add_argument('--plotting_E_index', type=int, default=1, required=False,
                    help='Which energy bin to plot')
@@ -90,8 +92,12 @@ if __name__ == "__main__":
     #### Load data
     # Load and deserialize the list from the file
     if opt.data_type == 'large':
-        with open(f'{root_dir}/Chandra_data/large_eventfiles_lifetime28800.pkl', 'rb') as file: 
-            data_lst = pickle.load(file)
+        if not opt.filter:
+            with open(f'{root_dir}/Chandra_data/large_eventfiles_lifetime28800.pkl', 'rb') as file: 
+                data_lst = pickle.load(file)
+        else:
+            with open(f'{root_dir}/Chandra_data/large_eventfiles_filtered_lifetime28800.pkl', 'rb') as file: 
+                data_lst = pickle.load(file)
     else:
         with open(f'{root_dir}/Chandra_data/small_eventfiles_lifetime43200.pkl', 'rb') as file: 
             data_lst = pickle.load(file)
@@ -156,18 +162,23 @@ if __name__ == "__main__":
     plt.figure(figsize=(12,9))
     plt.plot(torch.arange(opt.starting_epoch, opt.starting_epoch+opt.num_epochs), [l.cpu().detach() for l in model.losses[-opt.num_epochs:]])
     if opt.data_type == 'small':
-        plt.ylim([-1200,-300]);
+        plt.ylim([-1500,-500]);
+    plt.title(f'learning rate is {opt.lr}')
     plt.savefig(f'{folder_path}/training_history_{opt.starting_epoch+opt.num_epochs}epochs.png')
     
     
     ################ Inference
     if opt.data_type == 'large':
-        plotting_inds = [2088, 17743, 36200, 56507, 92786, # flares
-             7751, 44535, 51575, 78283, 95302, # dips
-            71, 159, 304, 381,                 # other large eventfiles
-            4, 11]                             # other small eventfiles
+        if not opt.filter:
+            plotting_inds = [17219, 34935, 36634, 54247, 88181, 88609,  # flares
+                     49551, 51095, 1970, 4424, 42866, 74778, # dips
+                    71, 159, 304, 381]               # other random ids
+        else:
+            plotting_inds = [297, 1940, 6294, 11123, 11197,  # flares
+                 290, 558, 911, 4683, 5587, 4997, # dips
+                71, 159, 304, 381, 2024]               # other random ids
     else:
-        plotting_inds = [i for i in range(16,24)] + [j for j in range(500,508)]
+        plotting_inds = [i for i in range(16,28)] + [j for j in range(500,504)]
     
     model.to(device)
     B_test = 16
@@ -178,20 +189,24 @@ if __name__ == "__main__":
         outputs.append(todevice(model(batch),'cpu'))
         
     # Plot total rates
+    if opt.data_type == 'large':
+        Tmax = 28800
+    else:
+        Tmax = 43200
     plt.figure(figsize=(12,9))
     for i, total_index in enumerate(plotting_inds):
         batch_index = total_index // B_test
         if opt.data_type == 'large':
-            index = total_index % 2 # Kind of random!
+            # index = total_index % 2 # Kind of random!
+            index = 0
         else:
             index = total_index % B_test
         batch = outputs[batch_index]
         mask = batch['mask'][index]
-        times = batch['event_list'][index,mask,0] * opt.plotting_t_scale
-        rates = batch['rates'][index,mask] / opt.plotting_t_scale
-        T = batch['T'][index] * opt.plotting_t_scale
+        times = batch['event_list'][index,mask,0] * opt.t_scale / 3600
+        rates = batch['rates'][index,mask] * Tmax / opt.t_scale / opt.plotting_nbins
         plt.subplot(4,4,i+1)
-        plt.hist(times, bins = torch.arange(torch.ceil(T)))
+        plt.hist(times, bins = opt.plotting_nbins)
         plt.plot(times, torch.sum(rates,dim=-1))
     plt.suptitle('Fitted vs true total rates',size=20)
     plt.tight_layout()

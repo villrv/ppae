@@ -197,15 +197,19 @@ class ResnetFC(nn.Module):
         return out
     
 class TransformerEncoder(nn.Module):
-    def __init__(self, d_input, d_model, nhead, num_encoder_layers, d_latent, dim_feedforward, dropout=0.1):
+    def __init__(self, d_input, d_model, nhead, num_encoder_layers, d_latent, dim_feedforward, c):
         super().__init__()
         
         # Transformer Encoder
         self.input_linear = nn.Linear(d_input, d_model)
+        init_weights(self.input_linear)
+        
         encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, 
-                                                   dim_feedforward=dim_feedforward, dropout=dropout, batch_first=True)
+                                                   dim_feedforward=dim_feedforward, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
         self.output_linear = nn.Linear(d_model, d_latent)
+        init_weights(self.output_linear)
+        self.c = c
 
     def forward(self, src, src_key_padding_mask):
         '''
@@ -330,8 +334,8 @@ class AutoEncoder(pl.LightningModule):
         # Compute the loss
         loss = -loglikelihood(log_event_rate_list, batch['mask'], event_t_list[:,:,-self.E_bins:], log_mesh_rate_list, T) + self.lam_latent * torch.norm(self.latent, p=2)
         if self.lam_TV > 0:
-            # loss += self.lam_TV * loss_TV(log_event_rate_list)
-            loss += self.lam_TV * loss_TV(log_mesh_rate_list)
+            # loss += self.lam_TV * loss_TV(torch.exp(log_event_rate_list))
+            loss += self.lam_TV * loss_TV(torch.exp(log_mesh_rate_list))
             
         self.log('train_loss', loss, prog_bar=True)
         self.losses_in_epoch.append(loss)
