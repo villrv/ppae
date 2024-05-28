@@ -2,8 +2,6 @@
 
 ## Training feedbacks on the dataset of 1000 eventfiles
 ### current problems
-- vanilla LSTM is too slow
-- sensitive to batch size and t_scale
 
 - Some data summary:
     - properties_full.csv: 
@@ -17,6 +15,19 @@
         - Harness ratio
         - Variability
         - 
+        
+## TODO
+- Calculate the hardness ratio beforehand so we don't need to calculate everytime
+        
+### Good results
+- Small dataset
+    - TV totalrate, plottotalrate, lamTV between 0.001 (obvious overfitting) to 0.01 (some underfitting)
+- Large dataset, lightly filtered
+    - lamTV 0.001: 80 epochs: some local overfitting, global not fitted enough
+    - lamTV 0.003: 20 epochs: pretty flat
+- Large dataset, heavily filtered
+    - lamTV 0.0003: ovbious overfitting
+    - lamTV 0.001: some global fitting happening
 
 ### What did not work
 - Small dataset
@@ -26,12 +37,17 @@
     - Increase to 48 token size for vanilla transformer
     - Mixed precision training REALLY HURTS!
     - Don't do custom initialization for LSTM! Dense layers should start at 0
+    - Should multiply by delta t in order to make things scale-less
+        - Not really needed, just tune lambda
+
 - Large dataset
     - lr increased to 5e-3
-    - TV loss on mesh rates
-        - Stuck on the following nonsense: extremely high rate at a single event (which is not on the mesh)
-    - TV loss on log event rates
+    - accumulate gradient doesn't help a huge
+    - TV loss on log rates
         - Some event might have infinity rate
+    - TV loss on event rates only
+        - Very wiggling
+    
 
 ### What did work
 - Small dataset
@@ -40,6 +56,11 @@
     - LSTM used last non-padded output
     - TV loss should be on mesh rates and lam_TV should be 0.2.
         - Questionable!
+    - Should include the t input for positional encoding
+    - TV on total grid.
+        - A big more smooth than just use meshrate
+    - Plot also on total grid
+    - t_scale is just T=43200
 - Large dataset
     - random shift at 0
     - Potentially eliminating nan/inf values
@@ -52,13 +73,11 @@
     - TV loss on usual (exp) rates
 
 ### further tuning ideas:
+
+    
+    
+- Gradient accumulation
+- Stochastic Weight Averaging
+- Automatic learning rate finder
+- Automatic batch size finder
 - Look for faster parallalizable networks like linear transformer and CNN+RNN?
-- Learnable positional encoding
-
-### Other small TODOs
-- Look for some good visualizations
-
-
-    
-    
-- Switch to transformers

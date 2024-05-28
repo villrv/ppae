@@ -34,10 +34,14 @@ if __name__ == "__main__":
     
     
     # Important ones (but with default values)
+    p.add_argument('--discrete', action='store_true',
+               help='Whether to use discrete version of the decoder (not a neural field)')
     p.add_argument('--random_shift', action='store_true',
                help='Whether to random shift the first event in the dataset')
     p.add_argument('--filter', action='store_true',
                help='Whether to filter the large dataset for balance')
+    p.add_argument('--more', action='store_true',
+               help='Whether to filter more the large dataset for testing')
     p.add_argument('--B', type=int, default=64, required=False,
                    help='Batch size')
     p.add_argument('--lr', type=float, default=0.001, required=False,
@@ -65,11 +69,9 @@ if __name__ == "__main__":
     # Less important ones
     p.add_argument('--T_threshold', type=int, default=43200, required=False,
                    help='Maximum T of eventfiles we consider. Longer eventfiles are truncated')
-    p.add_argument('--t_scale', type=int, default=5000, required=False,
-                   help='The scale we normalize times with. This is to ensure NN inputs are within reasonable range')
     p.add_argument('--num_workers', type=int, default=4, required=False,
                    help='Number of workers')
-    p.add_argument('--E_bins', type=int, default=13, required=False,
+    p.add_argument('--E_bins', type=int, default=3, required=False,
                    help='Number of energy bins to discretize for')
     p.add_argument('--plotting_nbins', type=int, default=100, required=False,
                    help='Scale to normalize times for plottng')
@@ -93,41 +95,28 @@ if __name__ == "__main__":
     # Load and deserialize the list from the file
     if opt.data_type == 'large':
         if not opt.filter:
-            with open(f'{root_dir}/Chandra_data/large_eventfiles_lifetime28800.pkl', 'rb') as file: 
-                data_lst = pickle.load(file)
+            filename = f'{root_dir}/Chandra_data/large_eventfiles_lifetime28800.pkl'
         else:
-            with open(f'{root_dir}/Chandra_data/large_eventfiles_filtered_lifetime28800.pkl', 'rb') as file: 
-                data_lst = pickle.load(file)
+            if not opt.more:
+                filename = f'{root_dir}/Chandra_data/large_eventfiles_filtered_lifetime28800.pkl'
+            else:
+                filename = f'{root_dir}/Chandra_data/large_eventfiles_filteredmore_lifetime28800.pkl'
+                
     else:
-        with open(f'{root_dir}/Chandra_data/small_eventfiles_lifetime43200.pkl', 'rb') as file: 
-            data_lst = pickle.load(file)
-#         true_flares_df = pd.read_csv(f'{root_dir}/Chandra_data/trueflares.csv')
-#         false_flares_df = pd.read_csv(f'{root_dir}/Chandra_data/falseflares.csv')
-#         true_flares_df = true_flares_df[['time','energy','obsreg_id']]
-#         false_flares_df = false_flares_df[['time','energy','obsreg_id']]
-
-#         # Convert to data dictionary
-#         d = true_flares_df.groupby('obsreg_id').apply(lambda group: np.array(group[['time', 'energy']])).to_dict()
-#         d.update(false_flares_df.groupby('obsreg_id').apply(lambda group: np.array(group[['time', 'energy']])).to_dict())
-
-#         # Convert to data list and drop outliers
-#         data_lst = []
-#         lengths = []
-#         Ts = []
-#         length_threshold = 5000
-#         T_threshold = 250000
-#         for key in list(d.keys()):
-#             length = len(d[key])
-#             T = max(d[key][:,0]) - min(d[key][:,0])
-#             if length > length_threshold or T > T_threshold:
-#                 continue
-#             else:
-#                 lengths.append(length)
-#                 Ts.append(T)
-#                 data_lst.append({'event_list':d[key]})
+        filename = f'{root_dir}/Chandra_data/small_eventfiles_lifetime43200.pkl'
+    
+    if opt.random_shift:
+        filename = filename[:-4] + '_randomshift.pkl'
+    
+    with open(filename, 'rb') as file: 
+        data_lst = pickle.load(file)
 
     # Load into dataset and dataloader
-    data = RealEventsDataset(data_lst,E_bins=opt.E_bins,t_scale=opt.t_scale, random_shift=opt.random_shift)
+    if opt.data_type == 'small':
+        t_scale = 43200
+    else:
+        t_scale = 28800
+    data = RealEventsDataset(data_lst,E_bins=opt.E_bins,t_scale=t_scale)
     loader = DataLoader(data, batch_size=opt.B, shuffle=True, num_workers=opt.num_workers, collate_fn=padding_collate_fn)
 
     ################## Create, train and save the NN model
@@ -138,21 +127,21 @@ if __name__ == "__main__":
                  accelerator=device, 
                  devices=1, 
                  plugins=[DisabledSLURMEnvironment(auto_requeue=False)],
-                 log_every_n_steps = 2,
-                 gradient_clip_val=clip_val)
+                 log_every_n_steps = 2)
+                 # callbacks=[StochasticWeightAveraging(swa_lrs=1e-2)])
+                 # accumulate_grad_batches=5)
+                 
+                 # gradient_clip_val=clip_val)
                 # precision="16-mixed")
+                
+    
     if opt.starting_epoch == 0:
-        model = AutoEncoder(opt.model_type, opt.num_latent, encoding, hidden_size=opt.hidden_size, E_bins=opt.E_bins,
-                        lam_TV=opt.lam_TV,lam_latent=opt.lam_latent, d_encoder_model=opt.d_transformer_token, nhead=opt.n_transformer_head,
-                        num_encoder_layers=opt.n_encoder_layers, dim_feedforward=opt.d_encoder_forward, lr=opt.lr)
+        modelclass = DiscreteAutoEncoder if opt.discrete else AutoEncoder
+        model = modelclass(opt.model_type, opt.num_latent, encoding, latent_num=len(data), hidden_size=opt.hidden_size, E_bins=opt.E_bins, lam_TV=opt.lam_TV,lam_latent=opt.lam_latent, d_encoder_model=opt.d_transformer_token, nhead=opt.n_transformer_head, num_encoder_layers=opt.n_encoder_layers, dim_feedforward=opt.d_encoder_forward, lr=opt.lr)
         history = trainer.fit(model, loader)
     else:
-        model = AutoEncoder.load_from_checkpoint(f'{folder_path}/model_{opt.starting_epoch}epochs.ckpt',
-                                          model_type=opt.model_type, latent_size=opt.num_latent, encoding=encoding,
-                                          hidden_size=opt.hidden_size, E_bins=opt.E_bins, lam_TV=opt.lam_TV, 
-                                           lam_latent=opt.lam_latent, d_encoder_model=opt.d_transformer_token,
-                                           nhead=opt.n_transformer_head,num_encoder_layers=opt.n_encoder_layers,
-                                           dim_feedforward=opt.d_encoder_forward, lr=opt.lr)
+        modelclass = DiscreteAutoEncoder if opt.discrete else AutoEncoder
+        model = modelclass.load_from_checkpoint(f'{folder_path}/model_{opt.starting_epoch}epochs.ckpt', model_type=opt.model_type, latent_size=opt.num_latent, encoding=encoding, latent_num=len(data), hidden_size=opt.hidden_size, E_bins=opt.E_bins, lam_TV=opt.lam_TV, lam_latent=opt.lam_latent, d_encoder_model=opt.d_transformer_token, nhead=opt.n_transformer_head,num_encoder_layers=opt.n_encoder_layers, dim_feedforward=opt.d_encoder_forward, lr=opt.lr)
         history = trainer.fit(model, loader, ckpt_path=f'{folder_path}/model_{opt.starting_epoch}epochs.ckpt')
 
     
@@ -161,8 +150,6 @@ if __name__ == "__main__":
     # Plot training history
     plt.figure(figsize=(12,9))
     plt.plot(torch.arange(opt.starting_epoch, opt.starting_epoch+opt.num_epochs), [l.cpu().detach() for l in model.losses[-opt.num_epochs:]])
-    if opt.data_type == 'small':
-        plt.ylim([-1500,-500]);
     plt.title(f'learning rate is {opt.lr}')
     plt.savefig(f'{folder_path}/training_history_{opt.starting_epoch+opt.num_epochs}epochs.png')
     
@@ -174,12 +161,20 @@ if __name__ == "__main__":
                      49551, 51095, 1970, 4424, 42866, 74778, # dips
                     71, 159, 304, 381]               # other random ids
         else:
-            plotting_inds = [297, 1940, 6294, 11123, 11197,  # flares
-                 290, 558, 911, 4683, 5587, 4997, # dips
-                71, 159, 304, 381, 2024]               # other random ids
+            if opt.more:
+                plotting_inds = [709, # flares
+                 64, 333, 363, 397, 412, 591, 592, # dips
+                71, 159, 304, 381, 118, 42, 513, 832]               # other random ids
+            else:
+                # Lightly filtered
+                plotting_inds = [297, 1940, 6294, 11123, 11197,  # flares
+                     290, 558, 911, 4683, 5587, 4997, # dips
+                    71, 159, 304, 381, 2024]               # other random ids
+            
+
     else:
-        plotting_inds = [i for i in range(16,28)] + [j for j in range(500,504)]
-    
+        plotting_inds = [i for i in range(8)] + [j for j in range(600,608)]
+    start_time = time.time()
     model.to(device)
     B_test = 16
     test_loader = DataLoader(data, batch_size=B_test, collate_fn=padding_collate_fn)
@@ -187,8 +182,9 @@ if __name__ == "__main__":
     for idx, batch in enumerate(test_loader):
         batch = todevice(batch, device)
         outputs.append(todevice(model(batch),'cpu'))
-        
+    
     # Plot total rates
+    
     if opt.data_type == 'large':
         Tmax = 28800
     else:
@@ -203,12 +199,18 @@ if __name__ == "__main__":
             index = total_index % B_test
         batch = outputs[batch_index]
         mask = batch['mask'][index]
-        times = batch['event_list'][index,mask,0] * opt.t_scale / 3600
-        rates = batch['rates'][index,mask] * Tmax / opt.t_scale / opt.plotting_nbins
+        times = batch['event_list'][index,mask,0] * t_scale / 3600
+        # rates = batch['rates'][index,mask] * Tmax / t_scale / opt.plotting_nbins
+        
+        total_mask = batch['total_mask'][index]
+        total_times = batch['total_list'][index,total_mask,0] * t_scale / 3600
+        total_rates = batch['total_rates'][index,total_mask] * Tmax / t_scale / opt.plotting_nbins
+        
         plt.subplot(4,4,i+1)
         plt.hist(times, bins = opt.plotting_nbins)
-        plt.plot(times, torch.sum(rates,dim=-1))
+        plt.plot(total_times, torch.sum(total_rates,dim=-1))
     plt.suptitle('Fitted vs true total rates',size=20)
     plt.tight_layout()
     plt.savefig(f'{folder_path}/total_rates_{opt.starting_epoch+opt.num_epochs}epochs.png')
+    print(time.time() - start_time)
 

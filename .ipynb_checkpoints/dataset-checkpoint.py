@@ -31,6 +31,121 @@ def onehot_code_energy(lst, E_grid):
     '''
     return np.concatenate((lst[:,0:1], np.eye(len(E_grid)-1)[np.digitize(lst[:,1], E_grid)-1]), axis = 1)
 
+def random_shift(data_lst):
+    for i in range(len(data_lst)):
+        d = data_lst[i]
+        T = np.max(d['event_list'][:,0])
+        shift = np.random.uniform(0, d['event_list'][1,0] - d['event_list'][0,0])
+        d['event_list'][:,0] = d['event_list'][:,0] + shift
+        temp_ind = np.where(d['event_list'][:,0] <= T)[0]
+        d['event_list'] = d['event_list'][temp_ind,:]
+        data_lst[i] = d
+    return data_lst
+
+def glvary(lst, T, m_max=14, resolution=10000):
+    '''
+    Implementation of Gregory Loredo variability index calculation
+    Input:
+        lst: list of arrival times
+        m_max: maximum number of bins to consider
+    Output:
+        O - Odds ratio
+        P - Probability
+        f3 - f3
+        f5 - f5
+        var_index - var_index
+    '''
+    N = len(lst)
+    Om_list = np.zeros(m_max-1)  # ith index means i+2 bins
+    ratesm_list = np.zeros((m_max-1, resolution-1))
+    mesh = np.linspace(T/resolution, T-T/resolution, resolution-1)
+    counts_list = np.zeros((m_max-1, m_max))
+    for m in range(2,m_max+1):
+        bin_edges = np.linspace(0, T, m + 1)
+        counts = np.histogram(lst, bins=m, range=(0, T))[0]
+        bin_rates = m * (counts+1) / (N+m)
+        temp = np.digitize(mesh, bin_edges, right=True)-1
+        ratesm_list[m-2,:] = bin_rates[temp]
+        Om_list[m-2] = N*np.log(m) + gammaln(m) - gammaln(N+m) + np.sum(gammaln(counts+1))
+        # Om_list[m-2] = -N*np.log(m)  - np.sum(gammaln(counts+1)) + gammaln(N+1)
+
+    Om_list = np.exp(Om_list)
+    O = np.mean(Om_list)
+    P = O / (1+O)
+    O = np.log(O) - np.log(10)
+    
+    weights = Om_list / np.sum(Om_list)
+    rates_list = np.sum(ratesm_list * weights[:, np.newaxis], axis=0)
+    rates_mean = np.mean(rates_list)
+    rates_sd = np.mean(np.sqrt(np.sum(ratesm_list**2 * weights[:, np.newaxis], axis=0) - rates_list**2))
+    f3 = np.sum((rates_list < rates_mean + 3*rates_sd) & (rates_list > rates_mean - 3*rates_sd)) / (resolution-1)
+    f5 = np.sum((rates_list < rates_mean + 5*rates_sd) & (rates_list > rates_mean - 5*rates_sd)) / (resolution-1)
+    
+    if P<=0.5:
+        var_index = 0
+    elif P < 2/3 and f3 > 0.997 and f5 == 1:
+        var_index = 1
+    elif P < 0.9 and f3 > 0.997 and f5 == 1:
+        var_index = 2
+    elif P < 0.6:
+        var_index = 3
+    elif P < 2/3:
+        var_index = 4
+    elif P < 0.9:
+        var_index = 5
+    elif O < 2:
+        var_index = 6
+    elif O < 4:
+        var_index = 7
+    elif O < 10:
+        var_index = 8
+    elif O < 30:
+        var_index = 9
+    else:
+        var_index = 10
+        
+    return P, var_index
+
+def compute_statistics(data_lst, t_scale):
+    '''
+    Compute different statistics for a list of data.
+    Input:
+        - data_lst: a list containing dictionaries. Each dic should have a "event_list" key.
+            - event_list: (N, 2)
+    Output: data_lst, with additional summary statistics computed
+    '''
+    for d in data_lst:
+        event_list = d['event_list']
+        
+        # Normalize
+        d['event_list'][:,0] = d['event_list'][:,0] - np.min(d['event_list'][:,0])
+        event_list = d['event_list']
+        
+        # Three different lists
+        soft_list = event_list[(event_list[:,1]>500) & (event_list[:,1]<=1200),0]
+        medium_list = event_list[(event_list[:,1]>1200) & (event_list[:,1]<=2000),0]
+        high_list = event_list[(event_list[:,1]>2000) & (event_list[:,1]<=7000),0]
+        event_list = event_list[:,0]
+        
+        # Hardness ratio
+        soft_flux = np.array(len(soft_list))
+        med_flux = np.array(len(medium_list))
+        high_flux = np.array(len(high_list))
+        d['hard_hm'] = (high_flux - med_flux) / (high_flux + med_flux)
+        d['hard_ms'] = (med_flux - soft_flux) / (med_flux + soft_flux)
+        d['hard_hs'] = (high_flux - soft_flux) / (high_flux + soft_flux)
+
+        # Variability Index!
+        P, var_index = glvary(event_list, t_scale)
+        d['var_prob_b'] = P
+        d['var_index_b'] = var_index
+        d['var_prob_s'] = glvary(soft_list, t_scale)[0]
+        d['var_prob_m'] = glvary(medium_list, t_scale)[0]
+        d['var_prob_h'] = glvary(high_list, t_scale)[0]
+        
+    return data_lst
+        
+
 class BaseEventsDataset(torch.utils.data.Dataset):
     '''
     This is the abstract class for events dataset
@@ -50,23 +165,20 @@ class RealEventsDataset(torch.utils.data.Dataset):
     The class that handles real dataset. 
     Input should be a list of dictionary, each dictionary is a source, containing 'event_list', and other keys
     '''
-    def __init__(self, lst, E_min=500, E_max=7000, E_bins=14, t_scale = 500, random_shift=False):
+    def __init__(self, lst, E_min=500, E_max=7000, E_bins=14, t_scale = 500):
         # Each entry of the list below should be a dictionary containing the event list, the source type label, and potentially the hyperparameters of the source
         self.data = [None] * len(lst)
         for i in range(len(lst)):
             d = lst[i]
-            if E_bins != 14:
-                E_grid = np.linspace(E_min, E_max, E_bins+1)
-            else:
+            if E_bins == 14:
                 E_grid = np.asarray([5,8.5,12,16,20,25,30,35,40,45,50,55,60,65,70]) * 100
+            elif E_bins == 3:
+                E_grid = np.asarray([5,12,20,70]) * 100
+            else:
+                E_grid = np.linspace(E_min, E_max, E_bins+1)
+
             d['event_list'] = onehot_code_energy(d['event_list'], E_grid)
-            d['event_list'][:,0] = (d['event_list'][:,0] - np.min(d['event_list'][:,0])) / t_scale
-            if random_shift:
-                T = np.max(d['event_list'][:,0])
-                shift = np.random.uniform(0, d['event_list'][1,0] - d['event_list'][0,0])
-                d['event_list'][:,0] = d['event_list'][:,0] + shift
-                temp_ind = np.where(d['event_list'][:,0] <= T)[0]
-                d['event_list'] = d['event_list'][temp_ind,:]
+            d['event_list'][:,0] = d['event_list'][:,0] / t_scale
             d['event_list'] = torch.tensor(d['event_list']).float()
             d['event_list_len'] = len(d['event_list'])
             d['idx'] = i
@@ -78,32 +190,32 @@ class RealEventsDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
             
-class StepFunctionEventsDatasetFixedTime(BaseEventsDataset):
-    '''
-    This class generates event lists from sources of the following type: Pos(10) for 0 <= t < 1, Pos(20/k) for 1 <= t < 1+k, and Pos(10) afterwards. It generate 40 arrivals and stops. The input k_list provides k values for different sources.
-    '''
-    def __init__(self, N, k_set):
-        super().__init__(N)
+# class StepFunctionEventsDatasetFixedTime(BaseEventsDataset):
+#     '''
+#     This class generates event lists from sources of the following type: Pos(10) for 0 <= t < 1, Pos(20/k) for 1 <= t < 1+k, and Pos(10) afterwards. It generate 40 arrivals and stops. The input k_list provides k values for different sources.
+#     '''
+#     def __init__(self, N, k_set):
+#         super().__init__(N)
         
-        k_set = torch.tensor(k_set)
+#         k_set = torch.tensor(k_set)
         
-        # Generate source types
-        type_list = torch.randint(0,len(k_set), (N,))
-        k_list = k_set[type_list]
+#         # Generate source types
+#         type_list = torch.randint(0,len(k_set), (N,))
+#         k_list = k_set[type_list]
         
-        for i in range(N):
-            d = {}
-            k = k_list[i]
-            d['k'] = k
-            d['type'] = type_list[i]
+#         for i in range(N):
+#             d = {}
+#             k = k_list[i]
+#             d['k'] = k
+#             d['type'] = type_list[i]
             
-            l1 = poisson_process_with_time(10, 1)
-            l2 = poisson_process_with_time(20.0/k, k)
-            l3 = poisson_process_with_time(10,1)
-            t_only_lst = torch.concat((torch.tensor(l1),1+torch.tensor(l2),1+k+torch.tensor(l3))).float().unsqueeze(-1)
-            d['event_list'] = torch.concat((t_only_lst, torch.ones_like(t_only_lst)), dim=1)
-            d['event_list_len'] = len(d['event_list'])
-            self.data[i] = d
+#             l1 = poisson_process_with_time(10, 1)
+#             l2 = poisson_process_with_time(20.0/k, k)
+#             l3 = poisson_process_with_time(10,1)
+#             t_only_lst = torch.concat((torch.tensor(l1),1+torch.tensor(l2),1+k+torch.tensor(l3))).float().unsqueeze(-1)
+#             d['event_list'] = torch.concat((t_only_lst, torch.ones_like(t_only_lst)), dim=1)
+#             d['event_list_len'] = len(d['event_list'])
+#             self.data[i] = d
                                       
 def padding_collate_fn(batch):
     batch.sort(key=lambda x: x['event_list_len'], reverse=True)
