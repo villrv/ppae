@@ -108,10 +108,13 @@ def loglikelihood(log_event_rate_list, T_mask, E_mask, log_mesh_rate_list, T):
         T: (B,)
     '''
     B, n_mesh, E_bins = log_mesh_rate_list.shape
-    integral = 0.5 * (torch.sum(torch.exp(log_mesh_rate_list[:,1:,:]), dim=(1,2)) + torch.sum(torch.exp(log_mesh_rate_list[:,:-1,:]), dim=(1,2))) * T / (n_mesh-1)   # (B,)
-    return torch.mean(torch.sum(log_event_rate_list * T_mask.unsqueeze(-1) * E_mask, dim=(1,2)) - integral)
+    integral = 0.5 * (
+        torch.sum(log_mesh_rate_list[:,1:,:].exp(), dim=(1,2))
+        + torch.sum(log_mesh_rate_list[:,:-1,:].exp(), dim=(1,2))
+    ) * T / (n_mesh-1)   # (B,)
+    return ((log_event_rate_list * T_mask.unsqueeze(-1) * E_mask).sum(dim=(1,2)) - integral).mean()
 
-def loss_TV(rate_list, T_mask=None):
+def total_variation(rate_list, T_mask=None):
     '''
     Calculate total variation for a log rate list. The absolute value of the first entry is calculated twice
     Input:
@@ -129,14 +132,8 @@ def loss_TV(rate_list, T_mask=None):
         return s / b
                 
     else:
-        return torch.mean(torch.sum(torch.abs(rate_list[:,1:,:] - rate_list[:,:-1,:]), dim=(1,2)))
+        return (rate_list[:,1:,:] - rate_list[:,:-1,:]).abs().sum(dim=(1,2)).mean()
     
-    # The following code is adaptive TV rate, not used anymore.
-    # return torch.mean(
-    #         torch.sum(
-    #             torch.abs(rate_list[:,1:,:] - rate_list[:,:-1,:]) * (coded_t_list[:,1:,0:1] - coded_t_list[:,:-1,0:1])
-    #             , dim=(1,2))
-    #     )
 
 def visualize_hist(times, t_scale):
     times = times / t_scale

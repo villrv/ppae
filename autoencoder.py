@@ -129,6 +129,7 @@ class ResnetFC(nn.Module):
         self,
         d_in,
         d_out,
+        d_latent,
         n_blocks=5,
         d_hidden=64,
         activation='ReLU'
@@ -148,6 +149,7 @@ class ResnetFC(nn.Module):
         init_weights(self.lin_out)
 
         self.n_blocks = n_blocks
+        self.d_latent = d_latent
         self.d_in = d_in
         self.d_out = d_out
         self.d_hidden = d_hidden
@@ -155,16 +157,28 @@ class ResnetFC(nn.Module):
         self.blocks = nn.ModuleList(
             [ResnetBlockFC(d_hidden, activation=activation) for i in range(n_blocks)]
         )
+        
+        if d_latent > 0: # Should always happen in our case
+            self.lin_z = nn.ModuleList(
+                [nn.Linear(d_latent, d_hidden) for i in range(n_blocks)]
+            )
+            for i in range(n_blocks):
+                init_weights(self.lin_z[i])
 
         if activation == 'ReLU':
             self.activation = nn.ReLU()
         else:
             self.activation = torch.sin
 
-    def forward(self, x):
-        x = self.lin_in(self.activation(x))
+    def forward(self, zx):
+        if self.d_latent > 0:
+            z = zx[..., :self.d_latent]
+            x = zx[..., self.d_latent:]
+        x = self.lin_in(x)
             
         for blkid in range(self.n_blocks):
+            tz = self.lin_z[blkid](z)
+            x = x + tz
             x = self.blocks[blkid](x)
             
         out = self.lin_out(self.activation(x))
@@ -233,7 +247,7 @@ class AutoEncoder(pl.LightningModule):
         event_list: (B, n, k), where n is the event list length that might change, and k is the dimension of each event, containing the positional encoding and the energy one-hot encoding
     Output: the log of the rate function at the query point x.
     '''
-    def __init__(self, model_type, latent_size, encoding, latent_num=947, hidden_size=128, E_bins=14, resolution=4096, lam_latent = 0, lam_TV = 0, lam_gradient = 0, d_encoder_model=32, nhead=4, num_encoder_layers=1, dim_feedforward=128, lr=1e-3):
+    def __init__(self, model_type, latent_size, encoding, latent_num=947, hidden_size=128, E_bins=14, resolution=4096, lam_latent = 0, lam_TV = 0, lam_gradient = 0, d_encoder_model=32, nhead=4, num_encoder_layers=1, dim_feedforward=128, lr=1e-3, test_batch=[]):
         super().__init__()
         self.model_type=model_type
         self.latent_num = latent_num
@@ -254,15 +268,15 @@ class AutoEncoder(pl.LightningModule):
             self.encoder = LSTMEncoder(self.code_size+self.E_bins, dim_feedforward, latent_size, num_encoder_layers)
         
         
-        self.decoder = ResnetFC(self.latent_size+self.code_size, self.E_bins, d_hidden=self.hidden_size, n_blocks=5)
+        self.decoder = ResnetFC(self.code_size, self.E_bins, self.latent_size, d_hidden=self.hidden_size, n_blocks=5)
 
         self.lr = lr
         self.resolution = resolution
         self.lam_latent = lam_latent
         self.lam_TV = lam_TV
+        self.test_batch = test_batch
 
-        self.losses_in_epoch = []
-        self.losses = []
+        self.loss_map = {'loss_total':[],'neg_loglikelihood':[],'loss_TV':[],'loss_latent':[]}
 
     def encode(self, encoder_input, mask):
         self.latent = self.encoder(encoder_input, mask) # (B, latent_size)
@@ -313,26 +327,58 @@ class AutoEncoder(pl.LightningModule):
         log_total_rate_list = self.decode(coded_total_t_list, indices)
         
         # Compute the loss
-        loss = -loglikelihood(log_event_rate_list, batch['mask'], event_t_list[:,:,-self.E_bins:], log_mesh_rate_list, T) + self.lam_latent * torch.norm(self.latent, p=2)
-        if self.lam_TV > 0:
-            loss += self.lam_TV * loss_TV(torch.exp(log_total_rate_list), T_mask = total_mask)
+        neg_loglikelihood = -loglikelihood(log_event_rate_list, batch['mask'], event_t_list[:,:,-self.E_bins:], log_mesh_rate_list, T)
+        loss_TV = total_variation(log_total_rate_list.exp(), T_mask = total_mask)
+        loss_latent = self.latent[indices].square().sum(dim=1).mean()
             # loss += self.lam_TV * loss_TV(torch.exp(log_event_rate_list), T_mask = batch['mask'])
             # loss += self.lam_TV * loss_TV(torch.exp(log_mesh_rate_list))
             
-        self.log('train_loss', loss, prog_bar=True)
-        self.losses_in_epoch.append(loss)
+        loss_total = self.lam_TV * loss_TV + self.lam_latent * loss_latent + neg_loglikelihood
         
-        return loss
+        self.loss_map['loss_total'].append(loss_total)
+        self.loss_map['loss_TV'].append(loss_TV)
+        self.loss_map['loss_latent'].append(loss_latent)
+        self.loss_map['neg_loglikelihood'].append(neg_loglikelihood)
+        
+        return loss_total
     
     
     def on_train_epoch_end(self):
-        self.tensor_losses_in_epoch = torch.stack(self.losses_in_epoch)
-        if torch.isnan(self.tensor_losses_in_epoch).any():
-            print('This epoch has nan loss')
-        elif torch.isinf(self.tensor_losses_in_epoch).any():
-            print('This epoch has inf loss')
-        self.losses.append(self.tensor_losses_in_epoch.nanmean())
-        self.losses_in_epoch.clear()
+        for k in self.loss_map.keys():
+            self.log(f'loss/{k}', torch.stack(self.loss_map[k]).mean(), on_step=False, on_epoch=True)
+            self.loss_map[k] = []
+        scheduler = self.lr_schedulers()
+        self.log('optim/model_lr', scheduler.optimizer.param_groups[0]['lr'], on_step=False, on_epoch=True)
+        self.log('optim/latent_lr', scheduler.optimizer.param_groups[1]['lr'], on_step=False, on_epoch=True)
+        
+
+    
+
+        t_scale = 28800
+        batch = self.forward(batch)
+
+        plt.figure(figsize=(6,9))
+        for index in range(8):
+            mask = batch['mask'][index]
+            times = batch['event_list'][index,mask,0] * t_scale / 3600
+
+            total_mask = batch['total_mask'][index]
+            total_times = batch['total_list'][index,total_mask,0] * t_scale / 3600
+            total_rates = batch['total_rates'][index,total_mask] * Tmax / t_scale / opt.plotting_nbins
+
+            plt.subplot(4,2,i+1)
+            plt.hist(times, bins = 100)
+            plt.plot(total_times, torch.sum(total_rates,dim=-1))
+        plt.tight_layout()
+        buf = BytesIO()
+        plt.savefig(buf, format='png')
+        plt.close(fig)
+        buf.seek(0)
+        image = Image.open(buf)
+        self.logger.experiment.log({"recon/recon": wandb.Image(image)})
+
+        
+        
         
     def forward(self, batch, optimization_epochs=200):
         event_t_list = batch['event_list']
@@ -415,136 +461,33 @@ class AutoEncoder(pl.LightningModule):
                 {"params": [self.latent], 'lr': self.lr * 10},
             ]
 
-            optimizer = torch.optim.Adam(grouped_parameters, lr=self.lr)
+            optimizer = torch.optim.Adam(grouped_parameters)
         scheduler = {
             'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50, verbose=True),
             'interval': 'epoch',
-            'monitor': 'train_loss'
+            'monitor': 'loss/loss_total'
         }
         return [optimizer], [scheduler]
 
     
-    def on_after_backward(self):
-        """
-        Check for NaN or infinite gradients after the backward pass and zero them out.
-        This approach prevents optimizer steps with unstable gradients.
-        """
-        valid_gradients = True
-        total_norm = 0.0
-        for name, param in self.named_parameters():
-            if param.grad is not None:
-                grad_norm = torch.norm(param.grad).item()
-                total_norm += grad_norm ** 2
+#     def on_after_backward(self):
+#         """
+#         Check for NaN or infinite gradients after the backward pass and zero them out.
+#         This approach prevents optimizer steps with unstable gradients.
+#         """
+#         valid_gradients = True
+#         total_norm = 0.0
+#         for name, param in self.named_parameters():
+#             if param.grad is not None:
+#                 grad_norm = torch.norm(param.grad).item()
+#                 total_norm += grad_norm ** 2
                 
-                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                    print(f"Detected {'nan' if torch.isnan(param.grad).any() else 'inf'} in gradients for {name}")
-                    valid_gradients = False
-                    break  # Exit early if any invalid gradient is found
+#                 if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+#                     print(f"Detected {'nan' if torch.isnan(param.grad).any() else 'inf'} in gradients for {name}")
+#                     valid_gradients = False
+#                     break  # Exit early if any invalid gradient is found
 
-        if not valid_gradients:
-            print("Invalid gradients detected, zeroing gradients")
-            # Zero out all gradients to prevent the optimizer step with unstable gradients
-            self.zero_grad(set_to_none=True)  # Use `set_to_none=True` for a more efficient zeroing
-            
-# class DiscreteAutoEncoder(AutoEncoder):
-#     '''
-#     This class inherits the AutoEncoder class. The difference being that the decoder now outputs a fixed resolution vector and uses linear interpolation, instead of outputing a neural field.
-#     '''
-#     def __init__(self, model_type, latent_size, encoding, latent_num=947, hidden_size=128, E_bins=14, resolution=4096, lam_latent = 0, lam_TV = 0, lam_gradient = 0, d_encoder_model=32, nhead=4, num_encoder_layers=1, dim_feedforward=128, lr=1e-3):
-#         pl.LightningModule.__init__(self)
-#         self.model_type=model_type
-#         self.latent_num = latent_num
-#         self.latent_size = latent_size
-#         self.hidden_size = hidden_size
-#         self.E_bins = E_bins
-#         self.code = encoding
-#         self.code_size = encoding.code_size
-
-#         if self.model_type=='decoder':
-#             latent_variables = torch.randn(latent_num, latent_size, requires_grad=True)
-#             self.latent = nn.Parameter(latent_variables)
-        
-        
-#         self.decoder = ResnetFC(self.latent_size, self.E_bins*(resolution+1), d_hidden=self.hidden_size, n_blocks=5)
-
-#         self.lr = lr
-#         self.resolution = resolution
-#         self.lam_latent = lam_latent
-#         self.lam_TV = lam_TV
-
-#         self.losses_in_epoch = []
-#         self.losses = []
-        
-#     def decode(self, indices=None, new_latents=None): # coded_t_list has shape (B, n, code_size)
-#         '''
-#         Input: et_list, the positional encoded t_list with shape (B, n, code_size)
-#         Output: log rate function values at those t, with shape (B, n)
-#         '''
-#         # Broadcast and concat
-#         if new_latents:
-#             B = new_latents.shape[0]
-#         else:
-#             B = indices.shape[0]
-#         if self.model_type=='decoder':
-#             if new_latents is not None:
-#                 decoder_input = new_latents # (B, latent_size)
-#             else:
-#                 decoder_input = self.latent[indices] # (B, latent_size)
-
-#         return self.decoder(decoder_input).reshape(B,-1,self.E_bins) # (B, resolution+1, E_bins)
-    
-#     def training_step(self, batch, batch_idx):
-#         '''
-#         Input: a batch of size B containing the following keys:
-#             event_list: (B, n, k)
-#             mask: (B, n)
-#         '''
-#         # code t_list
-#         event_t_list = batch['event_list']
-#         E_mask = event_t_list[:,:,-self.E_bins:]
-#         event_t_list = event_t_list[:,:,0] # (B, n)
-#         B, n = event_t_list.shape
-            
-#         # decode, for both the event list and a mesh (for integration)
-#         indices = batch['idx']
-#         log_mesh_rate_list = self.decode(indices) # (B, resolution+1, E_bins)
-#         log_event_rate_list = interpolate(log_mesh_rate_list, event_t_list)
-        
-#         # Compute the loss
-#         loss = -loglikelihood(log_event_rate_list, batch['mask'], E_mask, log_mesh_rate_list, 1) + self.lam_latent * torch.norm(self.latent, p=2)
-#         if self.lam_TV > 0:
-#             loss += self.lam_TV * loss_TV(torch.exp(log_mesh_rate_list))
-            
-#         self.log('train_loss', loss, prog_bar=True)
-#         self.losses_in_epoch.append(loss)
-        
-#         return loss
-
-#     def forward(self, batch, optimization_epochs=200):
-#         event_t_list = batch['event_list']
-#         E_mask = event_t_list[:,:,-self.E_bins:]
-#         event_t_list = event_t_list[:,:,0] # (B, n)
-#         B, n = event_t_list.shape
-
-                
-#         # Directly indexing latents
-#         with torch.no_grad():
-#             log_mesh_rate_list = self.decode(batch['idx'])
-#             resolution = log_mesh_rate_list.shape[1] - 1
-#             log_event_rate_list = interpolate(log_mesh_rate_list, event_t_list)
-            
-#             batch['latent'] = self.latent[batch['idx']].detach()
-
-
-#         batch.update({
-#             'rates': torch.exp(log_event_rate_list), 
-#             'total_rates': torch.exp(log_mesh_rate_list), 
-#             'total_list': torch.linspace(0,1,resolution+1).repeat(B, 1).unsqueeze(-1),
-#             'T': torch.ones(B),
-#             'num_events': torch.sum(batch['mask'], dim=-1),
-#             'total_mask': torch.ones((B, resolution+1)).bool()
-#             })
-
-#         return batch
-        
-    
+#         if not valid_gradients:
+#             print("Invalid gradients detected, zeroing gradients")
+#             # Zero out all gradients to prevent the optimizer step with unstable gradients
+#             self.zero_grad(set_to_none=True)  # Use `set_to_none=True` for a more efficient zeroing
