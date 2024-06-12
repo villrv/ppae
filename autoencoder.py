@@ -1,4 +1,7 @@
 from utils import *
+from io import BytesIO
+from PIL import Image
+import wandb
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
     
 
@@ -247,33 +250,34 @@ class AutoEncoder(pl.LightningModule):
         event_list: (B, n, k), where n is the event list length that might change, and k is the dimension of each event, containing the positional encoding and the energy one-hot encoding
     Output: the log of the rate function at the query point x.
     '''
-    def __init__(self, model_type, latent_size, encoding, latent_num=947, hidden_size=128, E_bins=14, resolution=4096, lam_latent = 0, lam_TV = 0, lam_gradient = 0, d_encoder_model=32, nhead=4, num_encoder_layers=1, dim_feedforward=128, lr=1e-3, test_batch=[]):
+    def __init__(self, opt, encoding, latent_num, test_batch=[]):
         super().__init__()
-        self.model_type=model_type
+        self.model_type = opt.model_type
+        self.latent_size = opt.latent_size
         self.latent_num = latent_num
-        self.latent_size = latent_size
-        self.hidden_size = hidden_size
-        self.E_bins = E_bins
+        self.hidden_size = opt.hidden_size
+        self.E_bins = opt.E_bins
         self.code = encoding
         self.code_size = encoding.code_size
 
         if self.model_type=='decoder':
-            latent_variables = torch.randn(latent_num, latent_size, requires_grad=True)
+            latent_variables = torch.randn(latent_num, opt.latent_size, requires_grad=True)
             self.latent = nn.Parameter(latent_variables)
         elif self.model_type=='transformer':
-            self.encoder = TransformerEncoder(self.code_size+self.E_bins, d_model=d_encoder_model, nhead=nhead, 
-                                              num_encoder_layers=num_encoder_layers, d_latent=latent_size, 
-                                              dim_feedforward=dim_feedforward, dropout=0.1)
+            self.encoder = TransformerEncoder(self.code_size+self.E_bins, d_model=opt.d_encoder_model, nhead=opt.nhead, 
+                                              num_encoder_layers=opt.num_encoder_layers, d_latent=latent_size, 
+                                              dim_feedforward=opt.dim_feedforward, dropout=0.1)
         elif self.model_type=='lstm':
-            self.encoder = LSTMEncoder(self.code_size+self.E_bins, dim_feedforward, latent_size, num_encoder_layers)
+            self.encoder = LSTMEncoder(self.code_size+self.E_bins, opt.dim_feedforward, latent_size, opt.num_encoder_layers)
         
         
         self.decoder = ResnetFC(self.code_size, self.E_bins, self.latent_size, d_hidden=self.hidden_size, n_blocks=5)
 
-        self.lr = lr
-        self.resolution = resolution
-        self.lam_latent = lam_latent
-        self.lam_TV = lam_TV
+        self.lr = opt.lr
+        self.resolution = opt.resolution
+        self.lam_latent = opt.lam_latent
+        self.lam_TV = opt.lam_TV
+        self.TV_type = opt.TV_type
         self.test_batch = test_batch
 
         self.loss_map = {'loss_total':[],'neg_loglikelihood':[],'loss_TV':[],'loss_latent':[]}
@@ -303,7 +307,7 @@ class AutoEncoder(pl.LightningModule):
             event_list: (B, n, k)
             mask: (B, n)
         '''
-        # code t_list
+        # code event_t_list
         event_t_list = batch['event_list']
         coded_event_t_list = self.code(event_t_list) # (B, n, code_size+E_bins)
         B, n, _ = coded_event_t_list.shape
@@ -322,16 +326,23 @@ class AutoEncoder(pl.LightningModule):
         log_event_rate_list = self.decode(coded_event_t_list[:,:,:self.code_size], indices) # (B, n, E_bins)
         log_mesh_rate_list = self.decode(coded_mesh_t_list, indices) # (B, n, E_bins)
         
-        total_t_list, total_mask = merge_with_mask(event_t_list[:,:,0:1], batch['mask'], mesh_t_list[:,:,0:1])
-        coded_total_t_list = self.code(total_t_list)
-        log_total_rate_list = self.decode(coded_total_t_list, indices)
+       
         
         # Compute the loss
         neg_loglikelihood = -loglikelihood(log_event_rate_list, batch['mask'], event_t_list[:,:,-self.E_bins:], log_mesh_rate_list, T)
-        loss_TV = total_variation(log_total_rate_list.exp(), T_mask = total_mask)
+        
+        if self.TV_type == 'separate':
+            TV1 = total_variation_normalized(log_mesh_rate_list.exp(), T_mask=None)
+            TV2 = total_variation_normalized(log_event_rate_list.exp(), T_mask=batch['mask'])
+            loss_TV = TV1 + TV2
+        elif self.TV_type == 'total':
+            total_t_list, total_mask = merge_with_mask(event_t_list[:,:,0:1], batch['mask'], mesh_t_list[:,:,0:1])
+            coded_total_t_list = self.code(total_t_list)
+            log_total_rate_list = self.decode(coded_total_t_list, indices)
+            loss_TV = total_variation_normalized(log_total_rate_list.exp(), T_mask = total_mask)
+            
         loss_latent = self.latent[indices].square().sum(dim=1).mean()
-            # loss += self.lam_TV * loss_TV(torch.exp(log_event_rate_list), T_mask = batch['mask'])
-            # loss += self.lam_TV * loss_TV(torch.exp(log_mesh_rate_list))
+
             
         loss_total = self.lam_TV * loss_TV + self.lam_latent * loss_latent + neg_loglikelihood
         
@@ -355,20 +366,21 @@ class AutoEncoder(pl.LightningModule):
     
 
         t_scale = 28800
-        batch = self.forward(batch)
+        batch = self.forward(todevice(self.test_batch, self.device))
 
-        plt.figure(figsize=(6,9))
-        for index in range(8):
-            mask = batch['mask'][index]
-            times = batch['event_list'][index,mask,0] * t_scale / 3600
+        fig = plt.figure(figsize=(6,9))
+        for ii, index in enumerate([0,1,2,3,4,5,14,15]):
+            mask = batch['mask'][index].cpu()
+            times = batch['event_list'][index,mask,0].cpu() * t_scale / 3600
+            rates = batch['rates'][index,mask].cpu() / 100
+            total_mask = batch['total_mask'][index].cpu()
+            total_times = batch['total_list'][index,total_mask,0].cpu() * t_scale / 3600
+            total_rates = batch['total_rates'][index,total_mask].cpu() / 100
 
-            total_mask = batch['total_mask'][index]
-            total_times = batch['total_list'][index,total_mask,0] * t_scale / 3600
-            total_rates = batch['total_rates'][index,total_mask] * Tmax / t_scale / opt.plotting_nbins
-
-            plt.subplot(4,2,i+1)
+            plt.subplot(4,2,ii+1)
             plt.hist(times, bins = 100)
             plt.plot(total_times, torch.sum(total_rates,dim=-1))
+            plt.title(f"source id: {int(batch['idx'][index].cpu().numpy())}")
         plt.tight_layout()
         buf = BytesIO()
         plt.savefig(buf, format='png')
@@ -407,7 +419,7 @@ class AutoEncoder(pl.LightningModule):
             with torch.no_grad():
                 log_event_rate_list = self.decode(coded_event_t_list[:,:,:self.code_size], batch['idx'])
                 log_total_rate_list = self.decode(coded_total_t_list[:,:,:self.code_size], batch['idx'])
-                # log_mesh_rate_list = self.decode(coded_mesh_t_list[:,:,:self.code_size], batch['idx'])
+                log_mesh_rate_list = self.decode(coded_mesh_t_list[:,:,:self.code_size], batch['idx'])
                 batch['latent'] = self.latent[batch['idx']].detach()
 
 
@@ -470,24 +482,24 @@ class AutoEncoder(pl.LightningModule):
         return [optimizer], [scheduler]
 
     
-#     def on_after_backward(self):
-#         """
-#         Check for NaN or infinite gradients after the backward pass and zero them out.
-#         This approach prevents optimizer steps with unstable gradients.
-#         """
-#         valid_gradients = True
-#         total_norm = 0.0
-#         for name, param in self.named_parameters():
-#             if param.grad is not None:
-#                 grad_norm = torch.norm(param.grad).item()
-#                 total_norm += grad_norm ** 2
+    def on_after_backward(self):
+        """
+        Check for NaN or infinite gradients after the backward pass and zero them out.
+        This approach prevents optimizer steps with unstable gradients.
+        """
+        valid_gradients = True
+        total_norm = 0.0
+        for name, param in self.named_parameters():
+            if param.grad is not None:
+                grad_norm = torch.norm(param.grad).item()
+                total_norm += grad_norm ** 2
                 
-#                 if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-#                     print(f"Detected {'nan' if torch.isnan(param.grad).any() else 'inf'} in gradients for {name}")
-#                     valid_gradients = False
-#                     break  # Exit early if any invalid gradient is found
+                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                    print(f"Detected {'nan' if torch.isnan(param.grad).any() else 'inf'} in gradients for {name}")
+                    valid_gradients = False
+                    break  # Exit early if any invalid gradient is found
 
-#         if not valid_gradients:
-#             print("Invalid gradients detected, zeroing gradients")
-#             # Zero out all gradients to prevent the optimizer step with unstable gradients
-#             self.zero_grad(set_to_none=True)  # Use `set_to_none=True` for a more efficient zeroing
+        if not valid_gradients:
+            print("Invalid gradients detected, zeroing gradients")
+            # Zero out all gradients to prevent the optimizer step with unstable gradients
+            self.zero_grad(set_to_none=True)  # Use `set_to_none=True` for a more efficient zeroing

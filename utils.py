@@ -134,6 +134,28 @@ def total_variation(rate_list, T_mask=None):
     else:
         return (rate_list[:,1:,:] - rate_list[:,:-1,:]).abs().sum(dim=(1,2)).mean()
     
+def total_variation_normalized(rate_list, T_mask=None):
+    '''
+    Calculate total variation for a log rate list. The absolute value of the first entry is calculated twice
+    Input:
+        rate_list: (B, n, E_bins)
+        T_mask: (B, n)
+    '''
+    if T_mask is not None:
+        rate_list = rate_list * T_mask.unsqueeze(-1)
+        b, n, e = rate_list.shape
+        s = 0
+        for i in range(b):
+            nn = torch.sum(T_mask[i,:])
+            if nn == 1:
+                continue
+            temp = rate_list[i,:nn,:]
+            s += torch.diff(temp,dim=0).abs().mean()
+        return s / b
+                
+    else:
+        return (rate_list[:,1:,:] - rate_list[:,:-1,:]).abs().mean()
+    
 
 def visualize_hist(times, t_scale):
     times = times / t_scale

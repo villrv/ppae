@@ -4,6 +4,7 @@ import json
 import logging
 import pickle
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
 import configargparse
 root_dir = "/nobackup/users/yankeson/Astronomy" 
 sys.path.insert(0, f"{root_dir}/ppae/")
@@ -30,8 +31,12 @@ if __name__ == "__main__":
                    help='Type of the model. decoder: decoder only. lstm: lstm encoder. transformer: vanilla transformer encoder')
     p.add_argument('--starting_epoch', type=int, required=True,
                    help='Which epoch to start training')
+    p.add_argument('--checkpoint_every', type=int, required=True,
+                   help='How often to save checkpoints')
     p.add_argument('--data_type', type=str, required=True,
                    help='Whether to use large or small dataset')
+    p.add_argument('--TV_type', type=str, required=True,
+                   help='Which TV loss type to use')
     
     
     # Important ones (but with default values)
@@ -39,45 +44,43 @@ if __name__ == "__main__":
                help='Whether to use discrete version of the decoder (not a neural field)')
     p.add_argument('--random_shift', action='store_true',
                help='Whether to random shift the first event in the dataset')
-    p.add_argument('--filter', action='store_true',
-               help='Whether to filter the large dataset for balance')
-    p.add_argument('--more', action='store_true',
-               help='Whether to filter more the large dataset for testing')
     p.add_argument('--B', type=int, default=32, required=False,
                    help='Batch size')
     p.add_argument('--lr', type=float, default=0.001, required=False,
                    help='Learning rate')
     p.add_argument('--num_freqs', type=int, default=12, required=False,
                    help='Number of frequencies for the positional encoding')
-    p.add_argument('--num_latent', type=int, default=64, required=False,
+    p.add_argument('--latent_size', type=int, default=64, required=False,
                    help='Dimensionality of latent space')
     p.add_argument('--hidden_size', type=int, default=512, required=False,
                    help='hidden size for the decoder ResNet')
     p.add_argument('--lam_latent', type=float, default=0.0, required=False,
                    help='Penalty for norm of latents')
-    p.add_argument('--d_transformer_token', type=int, default=48, required=False,
+    p.add_argument('--d_encoder_model', type=int, default=48, required=False,
                    help='Dimensionality of transformer token')
-    p.add_argument('--n_transformer_head', type=int, default=4, required=False,
+    p.add_argument('--n_head', type=int, default=4, required=False,
                    help='Number of transformer heads')
-    p.add_argument('--n_encoder_layers', type=int, default=1, required=False,
+    p.add_argument('--num_encoder_layers', type=int, default=1, required=False,
                    help='Number of encoder layers for transformer/LSTM')
-    p.add_argument('--d_encoder_forward', type=int, default=512, required=False,
+    p.add_argument('--dim_feedforward', type=int, default=512, required=False,
                    help='Number of feedforward neurons in transformer/LSTM')
+    p.add_argument('--clip_val', type=float, default=10.0, required=False,
+                   help='Value to clip gradient')
     
     
 
     
     # Less important ones
-    p.add_argument('--T_threshold', type=int, default=43200, required=False,
-                   help='Maximum T of eventfiles we consider. Longer eventfiles are truncated')
     p.add_argument('--num_workers', type=int, default=4, required=False,
                    help='Number of workers')
     p.add_argument('--E_bins', type=int, default=3, required=False,
                    help='Number of energy bins to discretize for')
+    p.add_argument('--resolution', type=int, default=2048, required=False,
+                   help='Resolution for mesh')
     p.add_argument('--plotting_nbins', type=int, default=100, required=False,
                    help='Scale to normalize times for plottng')
-    p.add_argument('--plotting_E_index', type=int, default=1, required=False,
-                   help='Which energy bin to plot')
+    # p.add_argument('--plotting_E_index', type=int, default=1, required=False,
+    #                help='Which energy bin to plot')
     
 
     opt = p.parse_args()
@@ -94,20 +97,17 @@ if __name__ == "__main__":
     #### Load data
     # Load and deserialize the list from the file
     if opt.data_type == 'large':
-        if not opt.filter:
-            filename = f'{root_dir}/Chandra_data/large_eventfiles_lifetime28800.pkl'
-        else:
-            if not opt.more:
-                filename = f'{root_dir}/Chandra_data/large_eventfiles_filtered_lifetime28800.pkl'
-            else:
-                filename = f'{root_dir}/Chandra_data/large_eventfiles_filteredmore_lifetime28800.pkl'
-                
+        filename = f'{root_dir}/Chandra_data/large_eventfiles_lifetime28800.pkl'
+    elif opt.data_type == 'large_filter':
+        filename = f'{root_dir}/Chandra_data/large_eventfiles_filtered_lifetime28800.pkl'
+    elif opt.data_type == 'large_filtermore':
+        filename = f'{root_dir}/Chandra_data/large_eventfiles_filteredmore_lifetime28800.pkl'      
     else:
         filename = f'{root_dir}/Chandra_data/small_eventfiles_lifetime43200.pkl'
     
     if opt.random_shift:
         filename = filename[:-4] + '_randomshift.pkl'
-    
+
     with open(filename, 'rb') as file: 
         data_lst = pickle.load(file)
 
@@ -121,20 +121,18 @@ if __name__ == "__main__":
     
     ##### Set up validation plotting
     if opt.data_type == 'large':
-        if not opt.filter:
-            plotting_inds = [17219, 34935, 36634, 54247, 88181, 88609,  # flares
-                     49551, 51095, 1970, 4424, 42866, 74778, # dips
-                    71, 159, 304, 381]               # other random ids
-        else:
-            if opt.more:
-                plotting_inds = [709, # flares
-                 64, 333, 363, 397, 412, 591, 592, # dips
-                71, 159, 304, 381, 118, 42, 513, 832]               # other random ids
-            else:
-                # Lightly filtered
-                plotting_inds = [297, 1940, 6294, 11123, 11197,  # flares
-                     290, 558, 911, 4683, 5587, 4997, # dips
-                    71, 159, 304, 381, 2024]               # other random ids
+        plotting_inds = [17219, 34935, 36634, 54247, 88181, 88609,  # flares
+                 49551, 51095, 1970, 4424, 42866, 74778, # dips
+                71, 159, 304, 381]               # other random ids
+    elif opt.data_type == 'large_filtermore':
+        plotting_inds = [709, # flares
+         64, 333, 363, 397, 412, 591, 592, # dips
+        71, 159, 304, 381, 118, 42, 513, 832]               # other random ids
+    elif opt.data_type == 'large_filter':
+        # Lightly filtered
+        plotting_inds = [297, 1940, 6294, 11123, 11197,  # flares
+             290, 558, 911, 4683, 5587, 4997, # dips
+            71, 159, 304, 381, 2024]               # other random ids
     else:
         plotting_inds = [i for i in range(8)] + [j for j in range(600,608)]
         
@@ -147,25 +145,34 @@ if __name__ == "__main__":
 
     clip_val = 1
     encoding = PositionalEncoding(num_freqs=opt.num_freqs)
+    
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=folder_path,
+        filename='model_{epoch}epochs.ckpt',  # Customize the checkpoint filename
+        save_top_k=-1,  # Save all checkpoints
+        every_n_epochs=opt.checkpoint_every  # Save a checkpoint every 10 epochs
+        )
+
     trainer = pl.Trainer(max_epochs=opt.starting_epoch+opt.num_epochs, 
                  accelerator=device, 
                  devices=1, 
                  plugins=[DisabledSLURMEnvironment(auto_requeue=False)],
-                 logger=wandb_logger)
+                 logger=wandb_logger,
+                 callbacks=checkpoint_callback,
+                 gradient_clip_val=opt.clip_val)
                  # callbacks=[StochasticWeightAveraging(swa_lrs=1e-2)])
                  # accumulate_grad_batches=5)
-                 
-                 # gradient_clip_val=clip_val)
+                 # )
                 # precision="16-mixed")
                 
     
     if opt.starting_epoch == 0:
         modelclass = DiscreteAutoEncoder if opt.discrete else AutoEncoder
-        model = modelclass(opt.model_type, opt.num_latent, encoding, latent_num=len(data), hidden_size=opt.hidden_size, E_bins=opt.E_bins, lam_TV=opt.lam_TV,lam_latent=opt.lam_latent, d_encoder_model=opt.d_transformer_token, nhead=opt.n_transformer_head, num_encoder_layers=opt.n_encoder_layers, dim_feedforward=opt.d_encoder_forward, lr=opt.lr, test_batch=batch)
+        model = modelclass(opt, encoding, latent_num=len(data), test_batch=batch)
         history = trainer.fit(model, loader)
     else:
         modelclass = DiscreteAutoEncoder if opt.discrete else AutoEncoder
-        model = modelclass.load_from_checkpoint(f'{folder_path}/model_{opt.starting_epoch}epochs.ckpt', model_type=opt.model_type, latent_size=opt.num_latent, encoding=encoding, latent_num=len(data), hidden_size=opt.hidden_size, E_bins=opt.E_bins, lam_TV=opt.lam_TV, lam_latent=opt.lam_latent, d_encoder_model=opt.d_transformer_token, nhead=opt.n_transformer_head,num_encoder_layers=opt.n_encoder_layers, dim_feedforward=opt.d_encoder_forward, lr=opt.lr, test_batch=batch)
+        model = modelclass.load_from_checkpoint(f'{folder_path}/model_{opt.starting_epoch}epochs.ckpt', opt=opt, encoding=encoding, latent_num=len(data), test_batch=batch)
         history = trainer.fit(model, loader, ckpt_path=f'{folder_path}/model_{opt.starting_epoch}epochs.ckpt')
 
     
