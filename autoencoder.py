@@ -256,6 +256,7 @@ class AutoEncoder(pl.LightningModule):
         self.latent_size = opt.latent_size
         self.latent_num = latent_num
         self.hidden_size = opt.hidden_size
+        self.hidden_blocks = opt.hidden_blocks
         self.E_bins = opt.E_bins
         self.code = encoding
         self.code_size = encoding.code_size
@@ -271,7 +272,7 @@ class AutoEncoder(pl.LightningModule):
             self.encoder = LSTMEncoder(self.code_size+self.E_bins, opt.dim_feedforward, latent_size, opt.num_encoder_layers)
         
         
-        self.decoder = ResnetFC(self.code_size, self.E_bins, self.latent_size, d_hidden=self.hidden_size, n_blocks=5)
+        self.decoder = ResnetFC(self.code_size, self.E_bins, self.latent_size, d_hidden=self.hidden_size, n_blocks=self.hidden_blocks)
 
         self.lr = opt.lr
         self.resolution = opt.resolution
@@ -361,36 +362,34 @@ class AutoEncoder(pl.LightningModule):
         scheduler = self.lr_schedulers()
         self.log('optim/model_lr', scheduler.optimizer.param_groups[0]['lr'], on_step=False, on_epoch=True)
         self.log('optim/latent_lr', scheduler.optimizer.param_groups[1]['lr'], on_step=False, on_epoch=True)
+
+        # Only make plots once in a while
         
+        # Reconstruction plot
+        if (self.current_epoch+1) % 10 == 0:
+            t_scale = 28800
+            batch = self.forward(todevice(self.test_batch, self.device))
 
-    
+            fig = plt.figure(figsize=(6,9))
+            for ii, index in enumerate([0,1,2,3,4,5,14,15]):
+                mask = batch['mask'][index].cpu()
+                times = batch['event_list'][index,mask,0].cpu() * t_scale / 3600
+                rates = batch['rates'][index,mask].cpu() / 100
+                total_mask = batch['total_mask'][index].cpu()
+                total_times = batch['total_list'][index,total_mask,0].cpu() * t_scale / 3600
+                total_rates = batch['total_rates'][index,total_mask].cpu() / 100
 
-        t_scale = 28800
-        batch = self.forward(todevice(self.test_batch, self.device))
-
-        fig = plt.figure(figsize=(6,9))
-        for ii, index in enumerate([0,1,2,3,4,5,14,15]):
-            mask = batch['mask'][index].cpu()
-            times = batch['event_list'][index,mask,0].cpu() * t_scale / 3600
-            rates = batch['rates'][index,mask].cpu() / 100
-            total_mask = batch['total_mask'][index].cpu()
-            total_times = batch['total_list'][index,total_mask,0].cpu() * t_scale / 3600
-            total_rates = batch['total_rates'][index,total_mask].cpu() / 100
-
-            plt.subplot(4,2,ii+1)
-            plt.hist(times, bins = 100)
-            plt.plot(total_times, torch.sum(total_rates,dim=-1))
-            plt.title(f"source id: {int(batch['idx'][index].cpu().numpy())}")
-        plt.tight_layout()
-        buf = BytesIO()
-        plt.savefig(buf, format='png')
-        plt.close(fig)
-        buf.seek(0)
-        image = Image.open(buf)
-        self.logger.experiment.log({"recon/recon": wandb.Image(image)})
-
-        
-        
+                plt.subplot(4,2,ii+1)
+                plt.hist(times, bins = 100)
+                plt.plot(total_times, torch.sum(total_rates,dim=-1))
+                plt.title(f"source id: {int(batch['idx'][index].cpu().numpy())}")
+            plt.tight_layout()
+            buf = BytesIO()
+            plt.savefig(buf, format='png')
+            plt.close(fig)
+            buf.seek(0)
+            image = Image.open(buf)
+            self.logger.experiment.log({"recon/recon": wandb.Image(image)})   
         
     def forward(self, batch, optimization_epochs=200):
         event_t_list = batch['event_list']

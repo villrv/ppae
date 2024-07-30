@@ -54,6 +54,8 @@ if __name__ == "__main__":
                    help='Dimensionality of latent space')
     p.add_argument('--hidden_size', type=int, default=512, required=False,
                    help='hidden size for the decoder ResNet')
+    p.add_argument('--hidden_blocks', type=int, default=5, required=False,
+                   help='number of hidden blocks for the decoder ResNet')
     p.add_argument('--lam_latent', type=float, default=0.0, required=False,
                    help='Penalty for norm of latents')
     p.add_argument('--d_encoder_model', type=int, default=48, required=False,
@@ -141,14 +143,27 @@ if __name__ == "__main__":
     batch = padding_collate_fn(batch)
 
     ################## Create, train and save the NN model
-    wandb_logger = WandbLogger(project='ppad', name=opt.model_name)
+    def find_id_by_name(project_name, run_name):
+        api = wandb.Api()
+        runs = api.runs(path=f"{api.default_entity}/{project_name}")
+        for run in runs:
+            if run.name == run_name:
+                return run.id
+        return None
+
+    # Search for the project by name and get its ID
+    run_id = find_id_by_name('ppad', f"{opt.model_name}_lr00001")
+    if run_id:
+        wandb_logger = WandbLogger(project='ppad', name=f"{opt.model_name}_lr00001", id=run_id, resume='allow')
+    else:
+        wandb_logger = WandbLogger(project='ppad', name=f"{opt.model_name}_lr00001")
 
     clip_val = 1
     encoding = PositionalEncoding(num_freqs=opt.num_freqs)
     
     checkpoint_callback = ModelCheckpoint(
         dirpath=folder_path,
-        filename='model_{epoch}epochs.ckpt',  # Customize the checkpoint filename
+        filename='model_{epoch}',  # Customize the checkpoint filename
         save_top_k=-1,  # Save all checkpoints
         every_n_epochs=opt.checkpoint_every  # Save a checkpoint every 10 epochs
         )
@@ -171,12 +186,17 @@ if __name__ == "__main__":
         model = modelclass(opt, encoding, latent_num=len(data), test_batch=batch)
         history = trainer.fit(model, loader)
     else:
+        search_pattern = os.path.join(folder_path, f'model_{opt.starting_epoch}epochs*.ckpt')
+        matching_files = glob(search_pattern)
+        if len(matching_files) == 0:
+            raise FileNotFoundError(f"No checkpoint files starting with 'model_{opt.starting_epoch}epochs' found in {folder_path}")
+        checkpoint_file = matching_files[0]
         modelclass = DiscreteAutoEncoder if opt.discrete else AutoEncoder
-        model = modelclass.load_from_checkpoint(f'{folder_path}/model_{opt.starting_epoch}epochs.ckpt', opt=opt, encoding=encoding, latent_num=len(data), test_batch=batch)
-        history = trainer.fit(model, loader, ckpt_path=f'{folder_path}/model_{opt.starting_epoch}epochs.ckpt')
+        model = modelclass.load_from_checkpoint(checkpoint_file, opt=opt, encoding=encoding, latent_num=len(data), test_batch=batch)
+        history = trainer.fit(model, loader, ckpt_path=checkpoint_file)
 
-    
-    trainer.save_checkpoint(f'{folder_path}/model_{opt.starting_epoch+opt.num_epochs}epochs.ckpt')
+    lrstr = f"{opt.lr:.0e}"
+    trainer.save_checkpoint(f'{folder_path}/model_{opt.starting_epoch+opt.num_epochs}epochs_lr{lrstr}.ckpt')
     
     
     

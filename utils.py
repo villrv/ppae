@@ -160,3 +160,42 @@ def total_variation_normalized(rate_list, T_mask=None):
 def visualize_hist(times, t_scale):
     times = times / t_scale
     plt.hist(times, bins = torch.arange(torch.ceil(torch.max(times))))
+    
+def plot_recon_grid(collated_outputs,
+                    indices,
+                   title_size=26,
+                   label_size=22,
+                   tick_size=20,
+                    figsize=(12,12),
+                   nbins=96,
+                   t_scale=28800,
+                    B=64,
+                   ):
+    k = len(indices)
+    
+    
+    kk = np.sqrt(k)
+    assert kk == int(kk)
+    kk = int(kk)
+
+    fig, axes = plt.subplots(kk,kk, figsize=figsize)
+    for i, total_index in enumerate(indices):
+
+        batch_index = total_index // B
+        index = total_index % B
+
+        mask = collated_outputs['mask'][batch_index][index]
+        times = collated_outputs['event_list'][batch_index][index,mask,0] * t_scale / 3600
+
+
+        total_mask = collated_outputs['total_mask'][batch_index][index]
+        total_times = collated_outputs['total_list'][batch_index][index,total_mask,0] * t_scale / 3600
+        rates = collated_outputs['total_rates'][batch_index][index,total_mask] / nbins
+
+        T = collated_outputs['T'][total_index] * t_scale
+        axes[i//kk,i%kk].hist(times, bins = nbins,label='Actual counts')
+        axes[i//kk,i%kk].plot(total_times, torch.sum(rates,dim=-1),label='Fitted rate',linewidth=2)
+        axes[i//kk,i%kk].tick_params(axis='both', which='major', labelsize=tick_size)
+
+    plt.tight_layout()
+    plt.show()
