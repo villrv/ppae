@@ -391,7 +391,7 @@ class AutoEncoder(pl.LightningModule):
             image = Image.open(buf)
             self.logger.experiment.log({"recon/recon": wandb.Image(image)})   
         
-    def forward(self, batch, optimization_epochs=200):
+    def forward(self, batch):
         event_t_list = batch['event_list']
         coded_event_t_list = self.code(event_t_list) # (B, n, code_size+E_bins)
         B, n, _ = coded_event_t_list.shape
@@ -420,36 +420,7 @@ class AutoEncoder(pl.LightningModule):
                 log_total_rate_list = self.decode(coded_total_t_list[:,:,:self.code_size], batch['idx'])
                 log_mesh_rate_list = self.decode(coded_mesh_t_list[:,:,:self.code_size], batch['idx'])
                 batch['latent'] = self.latent[batch['idx']].detach()
-
-
-#             # Test time optimization
-#             new_latents = torch.mean(self.latent, dim=0).repeat(B, 1).clone().detach().requires_grad_(True).to(coded_event_t_list.device)
-#             # new_latents = torch.randn(B, self.latent_size, requires_grad=True, device=coded_event_t_list.device)
-#             # new_latents = self.latent[batch['idx']].clone().detach().requires_grad_(True).to(coded_event_t_list.device)
-#             new_optimizer = torch.optim.Adam([new_latents], lr=0.1)
-
-#             # new_losses = []
-#             for epoch in range(optimization_epochs):
-#                 new_optimizer.zero_grad()
-#                 log_event_rate_list = self.decode(coded_event_t_list[:,:,:self.code_size], new_latents=new_latents)
-#                 log_mesh_rate_list = self.decode(coded_mesh_t_list, new_latents=new_latents)
-#                 log_total_rate_list = self.decode(coded_total_t_list[:,:,:self.code_size], new_latents=new_latents)
-#                 loss = -loglikelihood(log_event_rate_list, batch['mask'], event_t_list[:,:,-self.E_bins:], log_mesh_rate_list, T) + self.lam_latent * torch.norm(new_latents, p=2)
-#                 if self.lam_TV > 0:
-#                     loss += self.lam_TV * loss_TV(torch.exp(log_total_rate_list), T_mask = total_mask)
-#                 loss.backward()
-#                 # temp_norm = torch.norm(new_latents.detach()-self.latent[batch['idx']].detach())
-
-#                 if epoch % 10 == 0:
-#                     # print(loss)
-#                 new_optimizer.step()
-#                 # new_losses.append(loss)
-
-#             with torch.no_grad():
-#                 log_event_rate_list = self.decode(coded_event_t_list[:,:,:self.code_size], new_latents=new_latents)
-#                 log_total_rate_list = self.decode(coded_total_t_list[:,:,:self.code_size], new_latents=new_latents)
-
-
+                
         batch.update({
             'rates': torch.exp(log_event_rate_list), 
             'total_rates': torch.exp(log_total_rate_list), 
@@ -461,6 +432,59 @@ class AutoEncoder(pl.LightningModule):
             })
 
         return batch
+
+    def optimize_new_latent(self, batch, optimization_epochs=200):
+        assert self.model_type == 'decoder'
+        self.decoder.requires_grad_(False)
+        
+        # Test time optimization
+        event_t_list = batch['event_list']
+        T, _ = torch.max(event_t_list[:,:,0], dim=1)
+        coded_event_t_list = self.code(event_t_list)
+        B, n, _ = coded_event_t_list.shape
+        mesh_t_list = (T.unsqueeze(-1) * torch.linspace(0, 1, self.resolution+1).to(coded_event_t_list.device).unsqueeze(0)).unsqueeze(-1)
+        coded_mesh_t_list = self.code(mesh_t_list)
+        
+        
+        new_latents = torch.mean(self.latent, dim=0).repeat(B, 1).clone().detach().requires_grad_(True).to(coded_event_t_list.device)
+        new_optimizer = torch.optim.Adam([new_latents], lr=0.1)
+
+        # new_losses = []
+        for epoch in range(optimization_epochs):
+            new_optimizer.zero_grad(set_to_none=True)
+            log_event_rate_list = self.decode(coded_event_t_list[:,:,:self.code_size], new_latents=new_latents)
+            log_mesh_rate_list = self.decode(coded_mesh_t_list, new_latents=new_latents)
+            
+            neg_loglikelihood = -loglikelihood(log_event_rate_list, batch['mask'], event_t_list[:,:,-self.E_bins:], log_mesh_rate_list, T)
+            # Optionally add penalty for TV and latent
+            loss = neg_loglikelihood
+            loss.backward()
+
+
+            # if epoch % 10 == 0:
+                # print(loss)
+            new_optimizer.step()
+            # new_losses.append(loss)
+
+        with torch.no_grad():
+            log_event_rate_list = self.decode(coded_event_t_list[:,:,:self.code_size], new_latents=new_latents)
+            log_total_rate_list = self.decode(coded_total_t_list[:,:,:self.code_size], new_latents=new_latents)
+                
+        batch.update({
+            'latent': new_latents
+            'rates': torch.exp(log_event_rate_list), 
+            'total_rates': torch.exp(log_total_rate_list), 
+            'total_list': total_t_list,
+            'T': T,
+            'num_events': torch.sum(batch['mask'], dim=-1),
+            'total_mask': total_mask
+            })
+        
+        self.decoder.requires_grad_(True)
+        
+        return batch
+
+        
         
     
     def configure_optimizers(self):

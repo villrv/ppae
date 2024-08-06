@@ -19,6 +19,18 @@
         - large_filtered: 14891
         - large: 109656
         
+- Interesting sources to look at:
+    - 2CXO J011908.6-341130 (obsid 22096 region ID 9).
+        - No info?
+    - 2CXO J005440.5-374320        16029                    162   
+        - [64709, 64710]
+    - 2CXO J175046.8-311629        21218                    105 
+       - No info
+    - 2CXO J140314.3+541806        4732                     10 
+        - [1792, 1793]
+    - 2CXO J132943.3+471134        13814                    567   
+        - [90436, 90437, 90438, 90439, 90440, 90446]
+        
 
 
 ### What did not work
