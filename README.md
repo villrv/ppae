@@ -31,7 +31,10 @@
     - 2CXO J132943.3+471134        13814                    567   
         - [90436, 90437, 90438, 90439, 90440, 90446]
         
-
+- Questions:
+    - What other quantities to look at
+    - What I already wrote
+    - What else plot to put there
 
 ### What did not work
 - Small dataset
@@ -63,3 +66,8 @@
         - Batch normalization
     - Balance dataset
     
+## ToDO list
+- visualize classes in tsne
+- interesting event files
+- change reference chandra
+- YSO vs AGN classification

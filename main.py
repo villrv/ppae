@@ -40,8 +40,14 @@ if __name__ == "__main__":
     
     
     # Important ones (but with default values)
+    p.add_argument('--finetune_checkpoint', type=str, default=None, required=False,
+               help='Whether to finetune a model with larger dataset with one from smaller')
+    p.add_argument('--latent_only', action='store_true',
+               help='Whether to only optimize latents')
     p.add_argument('--discrete', action='store_true',
                help='Whether to use discrete version of the decoder (not a neural field)')
+    p.add_argument('--thin_resnet', action='store_true',
+               help='Whether to use thin resnet for the decoder')
     p.add_argument('--random_shift', action='store_true',
                help='Whether to random shift the first event in the dataset')
     p.add_argument('--B', type=int, default=32, required=False,
@@ -158,7 +164,7 @@ if __name__ == "__main__":
     else:
         wandb_logger = WandbLogger(project='ppad', name=f"{opt.model_name}_lr00001")
 
-    clip_val = 1
+    clip_val = 10
     encoding = PositionalEncoding(num_freqs=opt.num_freqs)
     
     checkpoint_callback = ModelCheckpoint(
@@ -180,10 +186,17 @@ if __name__ == "__main__":
                  # )
                 # precision="16-mixed")
                 
-    
+
     if opt.starting_epoch == 0:
         modelclass = DiscreteAutoEncoder if opt.discrete else AutoEncoder
         model = modelclass(opt, encoding, latent_num=len(data), test_batch=batch)
+        if opt.finetune_checkpoint is not None:
+            assert opt.data_type == 'large'
+            filename = f'{root_dir}/Chandra_data/large_eventfiles_filtered_lifetime28800.pkl'
+            with open(filename, 'rb') as file: 
+                small_data_lst = pickle.load(file)
+            model = load_from_less_latents(model, small_data_lst, data_lst, opt.finetune_checkpoint)
+            del small_data_lst
         history = trainer.fit(model, loader)
     else:
         search_pattern = os.path.join(folder_path, f'model_{opt.starting_epoch}epochs*.ckpt')
@@ -193,7 +206,27 @@ if __name__ == "__main__":
         checkpoint_file = matching_files[0]
         modelclass = DiscreteAutoEncoder if opt.discrete else AutoEncoder
         model = modelclass.load_from_checkpoint(checkpoint_file, opt=opt, encoding=encoding, latent_num=len(data), test_batch=batch)
-        history = trainer.fit(model, loader, ckpt_path=checkpoint_file)
+        try:
+            history = trainer.fit(model, loader, ckpt_path=checkpoint_file)
+        except Exception as e:
+            print('Cannot resume trainer normally, doing something else')
+            checkpoint = torch.load(checkpoint_file)
+
+            # Re-initialize the trainer
+            del trainer
+            trainer = pl.Trainer(max_epochs=opt.starting_epoch+opt.num_epochs, 
+                 accelerator=device, 
+                 devices=1, 
+                 plugins=[DisabledSLURMEnvironment(auto_requeue=False)],
+                 logger=wandb_logger,
+                 callbacks=checkpoint_callback,
+                 gradient_clip_val=opt.clip_val)
+            trainer.fit_loop.epoch_progress.current.completed = checkpoint['epoch']
+            trainer.fit_loop.epoch_loop._batches_that_stepped = checkpoint['global_step']
+            del checkpoint
+            history = trainer.fit(model, loader)
+        
+            
 
     lrstr = f"{opt.lr:.0e}"
     trainer.save_checkpoint(f'{folder_path}/model_{opt.starting_epoch+opt.num_epochs}epochs_lr{lrstr}.ckpt')

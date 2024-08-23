@@ -187,6 +187,54 @@ class ResnetFC(nn.Module):
         out = self.lin_out(self.activation(x))
         return out
     
+class ResnetFCThin(nn.Module):
+    def __init__(
+        self,
+        d_in,
+        d_out,
+        d_latent,
+        n_blocks=5,
+        d_hidden=64,
+        activation='ReLU'
+    ):
+        """
+        :param d_in input size
+        :param d_out output size
+        :param n_blocks number of Resnet blocks
+        :param d_hidden hidden dimension throughout network
+        """
+        super().__init__()
+        if d_in > 0:
+            self.lin_in = nn.Linear(d_in+d_latent, d_hidden)
+            init_weights(self.lin_in)
+
+        self.lin_out = nn.Linear(d_hidden, d_out)
+        init_weights(self.lin_out)
+
+        self.n_blocks = n_blocks
+        self.d_latent = d_latent
+        self.d_in = d_in
+        self.d_out = d_out
+        self.d_hidden = d_hidden
+
+        self.blocks = nn.ModuleList(
+            [ResnetBlockFC(d_hidden, activation=activation) for i in range(n_blocks)]
+        )
+
+        if activation == 'ReLU':
+            self.activation = nn.ReLU()
+        else:
+            self.activation = torch.sin
+
+    def forward(self, zx):
+        zx = self.lin_in(zx)
+            
+        for blkid in range(self.n_blocks):
+            zx = self.blocks[blkid](zx)
+            
+        out = self.lin_out(self.activation(zx))
+        return out
+    
 class TransformerEncoder(nn.Module):
     def __init__(self, d_input, d_model, nhead, num_encoder_layers, d_latent, dim_feedforward, c):
         super().__init__()
@@ -254,6 +302,7 @@ class AutoEncoder(pl.LightningModule):
         super().__init__()
         self.model_type = opt.model_type
         self.latent_size = opt.latent_size
+        self.latent_only = opt.latent_only if hasattr(opt, 'latent_only') else False
         self.latent_num = latent_num
         self.hidden_size = opt.hidden_size
         self.hidden_blocks = opt.hidden_blocks
@@ -271,8 +320,10 @@ class AutoEncoder(pl.LightningModule):
         elif self.model_type=='lstm':
             self.encoder = LSTMEncoder(self.code_size+self.E_bins, opt.dim_feedforward, latent_size, opt.num_encoder_layers)
         
-        
-        self.decoder = ResnetFC(self.code_size, self.E_bins, self.latent_size, d_hidden=self.hidden_size, n_blocks=self.hidden_blocks)
+        if not opt.thin_resnet:
+            self.decoder = ResnetFC(self.code_size, self.E_bins, self.latent_size, d_hidden=self.hidden_size, n_blocks=self.hidden_blocks)
+        else:
+            self.decoder = ResnetFCThin(self.code_size, self.E_bins, self.latent_size, d_hidden=self.hidden_size, n_blocks=self.hidden_blocks)
 
         self.lr = opt.lr
         self.resolution = opt.resolution
@@ -359,10 +410,13 @@ class AutoEncoder(pl.LightningModule):
         for k in self.loss_map.keys():
             self.log(f'loss/{k}', torch.stack(self.loss_map[k]).mean(), on_step=False, on_epoch=True)
             self.loss_map[k] = []
-        scheduler = self.lr_schedulers()
-        self.log('optim/model_lr', scheduler.optimizer.param_groups[0]['lr'], on_step=False, on_epoch=True)
-        self.log('optim/latent_lr', scheduler.optimizer.param_groups[1]['lr'], on_step=False, on_epoch=True)
-
+        if not self.latent_only:
+            scheduler = self.lr_schedulers()
+            self.log('optim/model_lr', scheduler.optimizer.param_groups[0]['lr'], on_step=False, on_epoch=True)
+            self.log('optim/latent_lr', scheduler.optimizer.param_groups[1]['lr'], on_step=False, on_epoch=True)
+        else:
+            scheduler = self.lr_schedulers()
+            self.log('optim/latent_lr', scheduler.optimizer.param_groups[0]['lr'], on_step=False, on_epoch=True)
         # Only make plots once in a while
         
         # Reconstruction plot
@@ -471,7 +525,7 @@ class AutoEncoder(pl.LightningModule):
             log_total_rate_list = self.decode(coded_total_t_list[:,:,:self.code_size], new_latents=new_latents)
                 
         batch.update({
-            'latent': new_latents
+            'latent': new_latents,
             'rates': torch.exp(log_event_rate_list), 
             'total_rates': torch.exp(log_total_rate_list), 
             'total_list': total_t_list,
@@ -484,12 +538,12 @@ class AutoEncoder(pl.LightningModule):
         
         return batch
 
-        
-        
     
     def configure_optimizers(self):
         if self.model_type != 'decoder':
             optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        elif self.latent_only:
+            optimizer = torch.optim.Adam([self.latent], lr=self.lr * 10)
         else:
             grouped_parameters = [
                 {"params": self.decoder.parameters(), 'lr': self.lr},
@@ -505,24 +559,24 @@ class AutoEncoder(pl.LightningModule):
         return [optimizer], [scheduler]
 
     
-    def on_after_backward(self):
-        """
-        Check for NaN or infinite gradients after the backward pass and zero them out.
-        This approach prevents optimizer steps with unstable gradients.
-        """
-        valid_gradients = True
-        total_norm = 0.0
-        for name, param in self.named_parameters():
-            if param.grad is not None:
-                grad_norm = torch.norm(param.grad).item()
-                total_norm += grad_norm ** 2
+#     def on_after_backward(self):
+#         """
+#         Check for NaN or infinite gradients after the backward pass and zero them out.
+#         This approach prevents optimizer steps with unstable gradients.
+#         """
+#         valid_gradients = True
+#         total_norm = 0.0
+#         for name, param in self.named_parameters():
+#             if param.grad is not None:
+#                 grad_norm = torch.norm(param.grad).item()
+#                 total_norm += grad_norm ** 2
                 
-                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                    print(f"Detected {'nan' if torch.isnan(param.grad).any() else 'inf'} in gradients for {name}")
-                    valid_gradients = False
-                    break  # Exit early if any invalid gradient is found
+#                 if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+#                     print(f"Detected {'nan' if torch.isnan(param.grad).any() else 'inf'} in gradients for {name}")
+#                     valid_gradients = False
+#                     break  # Exit early if any invalid gradient is found
 
-        if not valid_gradients:
-            print("Invalid gradients detected, zeroing gradients")
-            # Zero out all gradients to prevent the optimizer step with unstable gradients
-            self.zero_grad(set_to_none=True)  # Use `set_to_none=True` for a more efficient zeroing
+#         if not valid_gradients:
+#             print("Invalid gradients detected, zeroing gradients")
+#             # Zero out all gradients to prevent the optimizer step with unstable gradients
+#             self.zero_grad(set_to_none=True)  # Use `set_to_none=True` for a more efficient zeroing

@@ -93,7 +93,38 @@ def interpolate(mesh_rate_list, event_t_list):
     event_rate_list = A_floor + (A_ceil - A_floor) * B_remainder.unsqueeze(2)
 
     return event_rate_list
-    
+
+def load_from_less_latents(model, small_dset, big_dset, ckpt_path):
+    state = torch.load(ckpt_path)
+    state_dict = state['state_dict']
+    del state
+    small_latents = state_dict['latent']
+    del state_dict['latent']
+    model.load_state_dict(state_dict, strict=False)
+    del state_dict
+
+    # Load latents
+    i = 0
+    j = 0
+    m = len(small_dset)
+    assert small_latents.shape[0] == m
+    small_latents = small_latents.detach()
+    n = len(big_dset)
+    with torch.no_grad():
+        while True:
+            if i == m:
+                print('loading complete')
+                break
+            if j == n and i < m:
+                raise ValueError("Not everything is loaded")
+            if small_dset[i]['id'] == big_dset[j]['id']:
+                model.latent[j].copy_(small_latents[i])
+                i += 1
+                j += 1
+            else:
+                j += 1
+            
+    return model
 
 def loglikelihood(log_event_rate_list, T_mask, E_mask, log_mesh_rate_list, T):
     '''
