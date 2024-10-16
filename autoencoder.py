@@ -487,7 +487,7 @@ class AutoEncoder(pl.LightningModule):
 
         return batch
 
-    def optimize_new_latent(self, batch, optimization_epochs=200):
+    def optimize_new_latent(self, batch, optimization_epochs=200, lr=0.01, init='random', neg_likelihood_only=False, verbose=False):
         assert self.model_type == 'decoder'
         self.decoder.requires_grad_(False)
         
@@ -499,9 +499,14 @@ class AutoEncoder(pl.LightningModule):
         mesh_t_list = (T.unsqueeze(-1) * torch.linspace(0, 1, self.resolution+1).to(coded_event_t_list.device).unsqueeze(0)).unsqueeze(-1)
         coded_mesh_t_list = self.code(mesh_t_list)
         
+        total_t_list, total_mask = merge_with_mask(event_t_list[:,:,0:1], batch['mask'], mesh_t_list[:,:,0:1])
+        coded_total_t_list = self.code(total_t_list)
         
-        new_latents = torch.mean(self.latent, dim=0).repeat(B, 1).clone().detach().requires_grad_(True).to(coded_event_t_list.device)
-        new_optimizer = torch.optim.Adam([new_latents], lr=0.1)
+        if init == 'random':
+            new_latents = torch.randn_like(self.latent[0]).repeat(B, 1).requires_grad_(True).to(coded_event_t_list.device)
+        elif init == 'center':
+            new_latents = torch.mean(self.latent, dim=0).repeat(B, 1).clone().detach().requires_grad_(True).to(coded_event_t_list.device)
+        new_optimizer = torch.optim.Adam([new_latents], lr=lr)
 
         # new_losses = []
         for epoch in range(optimization_epochs):
@@ -510,13 +515,28 @@ class AutoEncoder(pl.LightningModule):
             log_mesh_rate_list = self.decode(coded_mesh_t_list, new_latents=new_latents)
             
             neg_loglikelihood = -loglikelihood(log_event_rate_list, batch['mask'], event_t_list[:,:,-self.E_bins:], log_mesh_rate_list, T)
-            # Optionally add penalty for TV and latent
-            loss = neg_loglikelihood
+            if self.TV_type == 'separate':
+                TV1 = total_variation_normalized(log_mesh_rate_list.exp(), T_mask=None)
+                TV2 = total_variation_normalized(log_event_rate_list.exp(), T_mask=batch['mask'])
+                loss_TV = TV1 + TV2
+            elif self.TV_type == 'total':
+                total_t_list, total_mask = merge_with_mask(event_t_list[:,:,0:1], batch['mask'], mesh_t_list[:,:,0:1])
+                coded_total_t_list = self.code(total_t_list)
+                log_total_rate_list = self.decode(coded_total_t_list, indices)
+                loss_TV = total_variation_normalized(log_total_rate_list.exp(), T_mask = total_mask)
+
+            loss_latent = new_latents.square().sum(dim=1).mean()
+
+        
+            if neg_likelihood_only:
+                loss = neg_loglikelihood
+            else:
+                loss = self.lam_TV * loss_TV + self.lam_latent * loss_latent + neg_loglikelihood
             loss.backward()
 
-
-            # if epoch % 10 == 0:
-                # print(loss)
+            if verbose:
+                if epoch % 10 == 0:
+                    print(f'after {epoch} epochs, loss are {loss.detach().item():.2f}')
             new_optimizer.step()
             # new_losses.append(loss)
 
@@ -533,7 +553,9 @@ class AutoEncoder(pl.LightningModule):
             'num_events': torch.sum(batch['mask'], dim=-1),
             'total_mask': total_mask
             })
-        
+        torch.cuda.empty_cache()
+        del log_event_rate_list, log_mesh_rate_list, log_total_rate_list
+        del new_optimizer
         self.decoder.requires_grad_(True)
         
         return batch

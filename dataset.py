@@ -42,6 +42,40 @@ def random_shift(data_lst):
         data_lst[i] = d
     return data_lst
 
+def prune(data_lst, T=28800):
+    pruned_lst = []
+    for i in range(len(data_lst)):
+        d = data_lst[i]
+        event_list = d['event_list']
+        
+        # normalize
+        if len(event_list) == 0:
+            continue
+        else:
+            event_list[:,0] = event_list[:,0] - np.min(event_list[:,0])
+        
+        # Cut
+        valid_indices = np.where((event_list[:,1] <= 7000) & (event_list[:,1] >= 500))[0]
+        event_list = event_list[valid_indices,:]
+        if event_list[-1,0] < T:
+            continue
+        else:
+            valid_indices = np.where(event_list[:,0] <= T)[0]
+            event_list = event_list[valid_indices,:]
+            if event_list.shape[0] < 2:
+                continue
+
+            # Random shift
+            shift = np.random.uniform(0, event_list[1,0] - event_list[0,0])
+            event_list[:,0] = event_list[:,0] + shift
+            temp_ind = np.where(event_list[:,0] <= T)[0]
+            event_list = event_list[temp_ind,:]
+            d['event_list'] = event_list
+            d['original_idx'] = i
+            pruned_lst.append(d)
+    return pruned_lst
+
+
 def glvary(lst, T, m_max=14, resolution=10000):
     '''
     Implementation of Gregory Loredo variability index calculation
@@ -165,7 +199,7 @@ class RealEventsDataset(torch.utils.data.Dataset):
     The class that handles real dataset. 
     Input should be a list of dictionary, each dictionary is a source, containing 'event_list', and other keys
     '''
-    def __init__(self, lst, E_min=500, E_max=7000, E_bins=14, t_scale = 500):
+    def __init__(self, lst, E_min=500, E_max=7000, E_bins=3, t_scale = 28800):
         # Each entry of the list below should be a dictionary containing the event list, the source type label, and potentially the hyperparameters of the source
         self.data = [None] * len(lst)
         for i in range(len(lst)):
@@ -176,7 +210,6 @@ class RealEventsDataset(torch.utils.data.Dataset):
                 E_grid = np.asarray([5,12,20,70]) * 100
             else:
                 E_grid = np.linspace(E_min, E_max, E_bins+1)
-
             d['event_list'] = onehot_code_energy(d['event_list'], E_grid)
             d['event_list'][:,0] = d['event_list'][:,0] / t_scale
             d['event_list'] = torch.tensor(d['event_list']).float()

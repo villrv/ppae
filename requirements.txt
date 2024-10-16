@@ -1,0 +1,12 @@
+pytorch-lightning
+configargparse
+torch
+torchvision
+pandas
+numpy
+scipy
+matplotlib
+einops
+dotmap
+wandb
+Pillow

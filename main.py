@@ -42,6 +42,8 @@ if __name__ == "__main__":
     # Important ones (but with default values)
     p.add_argument('--finetune_checkpoint', type=str, default=None, required=False,
                help='Whether to finetune a model with larger dataset with one from smaller')
+    p.add_argument('--finetune_checkpoint2', type=str, default=None, required=False,
+               help='Whether to resume full training after latent only training')
     p.add_argument('--latent_only', action='store_true',
                help='Whether to only optimize latents')
     p.add_argument('--discrete', action='store_true',
@@ -87,8 +89,6 @@ if __name__ == "__main__":
                    help='Resolution for mesh')
     p.add_argument('--plotting_nbins', type=int, default=100, required=False,
                    help='Scale to normalize times for plottng')
-    # p.add_argument('--plotting_E_index', type=int, default=1, required=False,
-    #                help='Which energy bin to plot')
     
 
     opt = p.parse_args()
@@ -197,6 +197,11 @@ if __name__ == "__main__":
                 small_data_lst = pickle.load(file)
             model = load_from_less_latents(model, small_data_lst, data_lst, opt.finetune_checkpoint)
             del small_data_lst
+        elif opt.finetune_checkpoint2 is not None:
+            print('Starting from finetune checkpoint 2')
+            del model
+            model = modelclass.load_from_checkpoint(opt.finetune_checkpoint2, opt=opt, encoding=encoding, latent_num=len(data), test_batch=batch)
+            history = trainer.fit(model, loader)
         history = trainer.fit(model, loader)
     else:
         search_pattern = os.path.join(folder_path, f'model_{opt.starting_epoch}epochs*.ckpt')
@@ -206,69 +211,7 @@ if __name__ == "__main__":
         checkpoint_file = matching_files[0]
         modelclass = DiscreteAutoEncoder if opt.discrete else AutoEncoder
         model = modelclass.load_from_checkpoint(checkpoint_file, opt=opt, encoding=encoding, latent_num=len(data), test_batch=batch)
-        try:
-            history = trainer.fit(model, loader, ckpt_path=checkpoint_file)
-        except Exception as e:
-            print('Cannot resume trainer normally, doing something else')
-            checkpoint = torch.load(checkpoint_file)
-
-            # Re-initialize the trainer
-            del trainer
-            trainer = pl.Trainer(max_epochs=opt.starting_epoch+opt.num_epochs, 
-                 accelerator=device, 
-                 devices=1, 
-                 plugins=[DisabledSLURMEnvironment(auto_requeue=False)],
-                 logger=wandb_logger,
-                 callbacks=checkpoint_callback,
-                 gradient_clip_val=opt.clip_val)
-            trainer.fit_loop.epoch_progress.current.completed = checkpoint['epoch']
-            trainer.fit_loop.epoch_loop._batches_that_stepped = checkpoint['global_step']
-            del checkpoint
-            history = trainer.fit(model, loader)
-        
-            
+        history = trainer.fit(model, loader, ckpt_path=checkpoint_file)
 
     lrstr = f"{opt.lr:.0e}"
     trainer.save_checkpoint(f'{folder_path}/model_{opt.starting_epoch+opt.num_epochs}epochs_lr{lrstr}.ckpt')
-    
-    
-    
-    ################ Inference
-#     model.to(device)
-#     B_test = 16
-#     test_loader = DataLoader(data, batch_size=B_test, collate_fn=padding_collate_fn)
-#     outputs = []
-#     for idx, batch in enumerate(test_loader):
-#         batch = todevice(batch, device)
-#         outputs.append(todevice(model(batch),'cpu'))
-    
-#     # Plot total rates
-    
-#     if opt.data_type == 'large':
-#         Tmax = 28800
-#     else:
-#         Tmax = 43200
-#     plt.figure(figsize=(12,9))
-#     for i, total_index in enumerate(plotting_inds):
-#         batch_index = total_index // B_test
-#         if opt.data_type == 'large':
-#             # index = total_index % 2 # Kind of random!
-#             index = 0
-#         else:
-#             index = total_index % B_test
-#         batch = outputs[batch_index]
-#         mask = batch['mask'][index]
-#         times = batch['event_list'][index,mask,0] * t_scale / 3600
-#         # rates = batch['rates'][index,mask] * Tmax / t_scale / opt.plotting_nbins
-        
-#         total_mask = batch['total_mask'][index]
-#         total_times = batch['total_list'][index,total_mask,0] * t_scale / 3600
-#         total_rates = batch['total_rates'][index,total_mask] * Tmax / t_scale / opt.plotting_nbins
-        
-#         plt.subplot(4,4,i+1)
-#         plt.hist(times, bins = opt.plotting_nbins)
-#         plt.plot(total_times, torch.sum(total_rates,dim=-1))
-#     plt.suptitle('Fitted vs true total rates',size=20)
-#     plt.tight_layout()
-#     plt.savefig(f'{folder_path}/total_rates_{opt.starting_epoch+opt.num_epochs}epochs.png')
-
