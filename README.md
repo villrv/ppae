@@ -1,6 +1,6 @@
 # PPAD
 
-This is the official codebase for the paper [A Poisson-process AutoDecoder for X-ray Sources](). The code and README is relatively poorly documented and some features are obsolete. The code only supports single GPU at the moment.
+This is the official codebase for the paper [A Poisson-process AutoDecoder for X-ray Sources](). The code and README is relatively poorly documented and some features are obsolete (like LSTMEncoder and TransformerEncoder). The code only supports single GPU at the moment.
 Feel free to contact Yanke Song (ysong@g.harvard.edu) if you have any questions.
 
 ```
@@ -46,4 +46,4 @@ python main.py --data_type "${data_type}" --model_name "${model_name}" --model_t
 --finetune_checkpoint2 "${finetune_checkpoint2}"
 ```
 
-If you want to train the model yourself, please refer to `main.py` for the training script and relevant options.
+If you want to train the model yourself, please refer to `main.py` for the training script and relevant options. You probably want to modify the training code to fit your need.

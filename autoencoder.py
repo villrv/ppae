@@ -579,26 +579,3 @@ class AutoEncoder(pl.LightningModule):
             'monitor': 'loss/loss_total'
         }
         return [optimizer], [scheduler]
-
-    
-#     def on_after_backward(self):
-#         """
-#         Check for NaN or infinite gradients after the backward pass and zero them out.
-#         This approach prevents optimizer steps with unstable gradients.
-#         """
-#         valid_gradients = True
-#         total_norm = 0.0
-#         for name, param in self.named_parameters():
-#             if param.grad is not None:
-#                 grad_norm = torch.norm(param.grad).item()
-#                 total_norm += grad_norm ** 2
-                
-#                 if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-#                     print(f"Detected {'nan' if torch.isnan(param.grad).any() else 'inf'} in gradients for {name}")
-#                     valid_gradients = False
-#                     break  # Exit early if any invalid gradient is found
-
-#         if not valid_gradients:
-#             print("Invalid gradients detected, zeroing gradients")
-#             # Zero out all gradients to prevent the optimizer step with unstable gradients
-#             self.zero_grad(set_to_none=True)  # Use `set_to_none=True` for a more efficient zeroing

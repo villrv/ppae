@@ -120,10 +120,7 @@ if __name__ == "__main__":
         data_lst = pickle.load(file)
 
     # Load into dataset and dataloader
-    if opt.data_type == 'small':
-        t_scale = 43200
-    else:
-        t_scale = 28800
+    t_scale = 28800
     data = RealEventsDataset(data_lst,E_bins=opt.E_bins,t_scale=t_scale)
     loader = DataLoader(data, batch_size=opt.B, shuffle=True, num_workers=opt.num_workers, collate_fn=padding_collate_fn)
     
@@ -132,10 +129,6 @@ if __name__ == "__main__":
         plotting_inds = [17219, 34935, 36634, 54247, 88181, 88609,  # flares
                  49551, 51095, 1970, 4424, 42866, 74778, # dips
                 71, 159, 304, 381]               # other random ids
-    elif opt.data_type == 'large_filtermore':
-        plotting_inds = [709, # flares
-         64, 333, 363, 397, 412, 591, 592, # dips
-        71, 159, 304, 381, 118, 42, 513, 832]               # other random ids
     elif opt.data_type == 'large_filter':
         # Lightly filtered
         plotting_inds = [297, 1940, 6294, 11123, 11197,  # flares
