@@ -12,7 +12,7 @@ pip install requirements.txt
 ## Inference
 For inference on new event files, you would first want to create a data list, which is a python list of dictionaries. Each dictionary contains the key "event_list", which stores a two-dimensional numpy array recording the arrival time and energy of photons (an event list), and other variables for your convenience, like "obsreg_id".
 
-Then run the following code, with your options 
+Then run the following code, replacing variables in ${} with you actual paths 
 ```
 python inference.py --checkpoint ${checkpoint} --data ${data} --save_location ${save_location} root_dir ${root_dir}
 ```
