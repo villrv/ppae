@@ -14,7 +14,8 @@ For inference on new event files, you would first want to create a data list, wh
 
 Then run the following code, replacing variables in ${} with you actual paths 
 ```
-python inference.py --checkpoint ${checkpoint} --data ${data} --save_location ${save_location} root_dir ${root_dir}
+python inference.py --checkpoint ${checkpoint} --data ${data} --save_location ${save_location}
+
 ```
 
 

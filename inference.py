@@ -27,16 +27,14 @@ if __name__ == "__main__":
                    help='path to data (in pkl format)')
     p.add_argument('--save_location', type=str, required=True,
                    help='place to save computed latents')
-    p.add_argument('--root_dir', type=str, required=True,
-                   help='the root directory where ppad lies')
     
     # Optional ones
-    p.add_argument('--optimization_epochs', type=int, required=False,
+    p.add_argument('--optimization_epochs', type=int, default=400,
                    help='How many iterations to do optimization')
-    p.add_argument('--lr', type=float, required=False,
+    p.add_argument('--lr', type=float, default=0.01,
                    help='learning rate for test time optimization')
 
-    opt = p.parse_args()
+    args = p.parse_args()
     
     
     
@@ -63,7 +61,7 @@ if __name__ == "__main__":
     
     # Load your data
     with open(args.data, 'rb') as f:
-    data_list = pickle.load(f)
+        data_list = pickle.load(f)
     
     # The following line of code optionally prunes your data if the event files are not yet in 8 hour lifetime.
     pruned_list = prune(data_list)
@@ -71,15 +69,15 @@ if __name__ == "__main__":
     data = RealEventsDataset(pruned_list,E_bins=3,t_scale=28800)
     test_loader = DataLoader(data, batch_size=B, collate_fn=padding_collate_fn)
     
-    
+    print('finished preparing data')
     
     
     outputs = []
     for idx, batch in enumerate(test_loader):
-        temp = idx * B
         batch = todevice(batch, device)
         batch = model.optimize_new_latent(batch, optimization_epochs=args.optimization_epochs, lr=args.lr, init='center', neg_likelihood_only=False, verbose=False)
         outputs.append(todevice(batch,'cpu'))
+        print(f'finished {(idx+1)*B} sources')
 
     def output_collate_fn(outputs):
         '''
