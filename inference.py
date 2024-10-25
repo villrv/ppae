@@ -85,7 +85,7 @@ if __name__ == "__main__":
         '''
         output = {}
         for key in outputs[0].keys():
-            if torch.is_tensor(outputs[0][key]):
+            if key in ['latent']:
                 output[key] = torch.cat([o[key] for o in outputs], dim=0)
             else:
                 output[key] = [o[key] for o in outputs]
@@ -93,4 +93,10 @@ if __name__ == "__main__":
 
     collated_outputs = output_collate_fn(outputs)
 
-    np.save(args.save_location, collated_outputs['latent'].detach().cpu().numpy())
+    # np.save(args.save_location, collated_outputs['latent'].detach().cpu().numpy())
+    collated_original_idx = torch.cat(collated_outputs['original_idx'],dim=0)
+    output_d = {'latents': collated_outputs['latent'].detach().cpu().numpy(),
+                'original_idx': collated_original_idx.detach().cpu().numpy()}
+    output_d.keys()
+    with open(args.save_location, 'wb') as f:
+        pickle.dump(output_d, f)
