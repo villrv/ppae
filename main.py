@@ -10,7 +10,7 @@ root_dir = "/nobackup/users/yankeson/Astronomy"
 sys.path.insert(0, f"{root_dir}/ppae/")
 
 from utils import *
-from autoencoder import *
+from autodecoder import *
 from dataset import *
 
 
@@ -27,16 +27,12 @@ if __name__ == "__main__":
                    help='Number of epochs to train')
     p.add_argument('--lam_TV', type=float, required=True,
                    help='Penalty for total variation')
-    p.add_argument('--model_type', type=str, required=True,
-                   help='Type of the model. decoder: decoder only. lstm: lstm encoder. transformer: vanilla transformer encoder')
     p.add_argument('--starting_epoch', type=int, required=True,
                    help='Which epoch to start training')
     p.add_argument('--checkpoint_every', type=int, required=True,
                    help='How often to save checkpoints')
     p.add_argument('--data_type', type=str, required=True,
                    help='Whether to use large or small dataset')
-    p.add_argument('--TV_type', type=str, required=True,
-                   help='Which TV loss type to use')
     
     
     # Important ones (but with default values)
@@ -46,12 +42,7 @@ if __name__ == "__main__":
                help='Whether to resume full training after latent only training')
     p.add_argument('--latent_only', action='store_true',
                help='Whether to only optimize latents')
-    p.add_argument('--discrete', action='store_true',
-               help='Whether to use discrete version of the decoder (not a neural field)')
-    p.add_argument('--thin_resnet', action='store_true',
-               help='Whether to use thin resnet for the decoder')
-    p.add_argument('--random_shift', action='store_true',
-               help='Whether to random shift the first event in the dataset')
+
     p.add_argument('--B', type=int, default=32, required=False,
                    help='Batch size')
     p.add_argument('--lr', type=float, default=0.001, required=False,
@@ -66,29 +57,14 @@ if __name__ == "__main__":
                    help='number of hidden blocks for the decoder ResNet')
     p.add_argument('--lam_latent', type=float, default=0.0, required=False,
                    help='Penalty for norm of latents')
-    p.add_argument('--d_encoder_model', type=int, default=48, required=False,
-                   help='Dimensionality of transformer token')
-    p.add_argument('--n_head', type=int, default=4, required=False,
-                   help='Number of transformer heads')
-    p.add_argument('--num_encoder_layers', type=int, default=1, required=False,
-                   help='Number of encoder layers for transformer/LSTM')
-    p.add_argument('--dim_feedforward', type=int, default=512, required=False,
-                   help='Number of feedforward neurons in transformer/LSTM')
     p.add_argument('--clip_val', type=float, default=10.0, required=False,
                    help='Value to clip gradient')
-    
-    
-
     
     # Less important ones
     p.add_argument('--num_workers', type=int, default=4, required=False,
                    help='Number of workers')
-    p.add_argument('--E_bins', type=int, default=3, required=False,
-                   help='Number of energy bins to discretize for')
     p.add_argument('--resolution', type=int, default=2048, required=False,
                    help='Resolution for mesh')
-    p.add_argument('--plotting_nbins', type=int, default=100, required=False,
-                   help='Scale to normalize times for plottng')
     
 
     opt = p.parse_args()
@@ -105,23 +81,16 @@ if __name__ == "__main__":
     #### Load data
     # Load and deserialize the list from the file
     if opt.data_type == 'large':
-        filename = f'{root_dir}/Chandra_data/large_eventfiles_lifetime28800.pkl'
+        filename = f'{root_dir}/Chandra_data/large_eventfiles_lifetime28800_randomshift.pkl'
     elif opt.data_type == 'large_filter':
-        filename = f'{root_dir}/Chandra_data/large_eventfiles_filtered_lifetime28800.pkl'
-    elif opt.data_type == 'large_filtermore':
-        filename = f'{root_dir}/Chandra_data/large_eventfiles_filteredmore_lifetime28800.pkl'      
-    else:
-        filename = f'{root_dir}/Chandra_data/small_eventfiles_lifetime43200.pkl'
-    
-    if opt.random_shift:
-        filename = filename[:-4] + '_randomshift.pkl'
+        filename = f'{root_dir}/Chandra_data/large_eventfiles_filtered_lifetime28800_randomshift.pkl'
 
     with open(filename, 'rb') as file: 
         data_lst = pickle.load(file)
 
     # Load into dataset and dataloader
     t_scale = 28800
-    data = RealEventsDataset(data_lst,E_bins=opt.E_bins,t_scale=t_scale)
+    data = RealEventsDataset(data_lst, t_scale=t_scale)
     loader = DataLoader(data, batch_size=opt.B, shuffle=True, num_workers=opt.num_workers, collate_fn=padding_collate_fn)
     
     ##### Set up validation plotting
@@ -134,14 +103,13 @@ if __name__ == "__main__":
         plotting_inds = [297, 1940, 6294, 11123, 11197,  # flares
              290, 558, 911, 4683, 5587, 4997, # dips
             71, 159, 304, 381, 2024]               # other random ids
-    else:
-        plotting_inds = [i for i in range(8)] + [j for j in range(600,608)]
         
-    # Define the test set
     batch = [data[i] for i in plotting_inds]
     batch = padding_collate_fn(batch)
 
     ################## Create, train and save the NN model
+    
+    # wandb logger
     def find_id_by_name(project_name, run_name):
         api = wandb.Api()
         runs = api.runs(path=f"{api.default_entity}/{project_name}")
@@ -157,7 +125,7 @@ if __name__ == "__main__":
     else:
         wandb_logger = WandbLogger(project='ppad', name=f"{opt.model_name}_lr00001")
 
-    clip_val = 10
+    # prepare models and trainers
     encoding = PositionalEncoding(num_freqs=opt.num_freqs)
     
     checkpoint_callback = ModelCheckpoint(
@@ -174,16 +142,11 @@ if __name__ == "__main__":
                  logger=wandb_logger,
                  callbacks=checkpoint_callback,
                  gradient_clip_val=opt.clip_val)
-                 # callbacks=[StochasticWeightAveraging(swa_lrs=1e-2)])
-                 # accumulate_grad_batches=5)
-                 # )
-                # precision="16-mixed")
-                
-
+    
+    # Start training
     if opt.starting_epoch == 0:
-        modelclass = DiscreteAutoEncoder if opt.discrete else AutoEncoder
-        model = modelclass(opt, encoding, latent_num=len(data), test_batch=batch)
         if opt.finetune_checkpoint is not None:
+            model = AutoDecoder(opt, encoding, latent_num=len(data), test_batch=batch)
             assert opt.data_type == 'large'
             filename = f'{root_dir}/Chandra_data/large_eventfiles_filtered_lifetime28800.pkl'
             with open(filename, 'rb') as file: 
@@ -191,10 +154,7 @@ if __name__ == "__main__":
             model = load_from_less_latents(model, small_data_lst, data_lst, opt.finetune_checkpoint)
             del small_data_lst
         elif opt.finetune_checkpoint2 is not None:
-            print('Starting from finetune checkpoint 2')
-            del model
-            model = modelclass.load_from_checkpoint(opt.finetune_checkpoint2, opt=opt, encoding=encoding, latent_num=len(data), test_batch=batch)
-            history = trainer.fit(model, loader)
+            model = AutoDecoder.load_from_checkpoint(opt.finetune_checkpoint2, opt=opt, encoding=encoding, latent_num=len(data), test_batch=batch)
         history = trainer.fit(model, loader)
     else:
         search_pattern = os.path.join(folder_path, f'model_{opt.starting_epoch}epochs*.ckpt')
@@ -202,8 +162,7 @@ if __name__ == "__main__":
         if len(matching_files) == 0:
             raise FileNotFoundError(f"No checkpoint files starting with 'model_{opt.starting_epoch}epochs' found in {folder_path}")
         checkpoint_file = matching_files[0]
-        modelclass = DiscreteAutoEncoder if opt.discrete else AutoEncoder
-        model = modelclass.load_from_checkpoint(checkpoint_file, opt=opt, encoding=encoding, latent_num=len(data), test_batch=batch)
+        model = AutoDecoder.load_from_checkpoint(checkpoint_file, opt=opt, encoding=encoding, latent_num=len(data), test_batch=batch)
         history = trainer.fit(model, loader, ckpt_path=checkpoint_file)
 
     lrstr = f"{opt.lr:.0e}"
